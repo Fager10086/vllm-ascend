@@ -82,6 +82,7 @@ if (BUILD_OPEN_PROJECT)
             $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
             $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
             $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn_kernels>
+            $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/pkg_inc>
     )
     target_compile_options(opapi PRIVATE
             -Werror=format
