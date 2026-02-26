@@ -55,6 +55,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     rope_dim: tl.constexpr,
     half_rope_dim: tl.constexpr,
     IS_PARTIAL_ROPE: tl.constexpr,
+    gate_size: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
 
@@ -78,14 +79,14 @@ def split_qkv_rmsnorm_mrope_kernel(
     for index in range(loop_num):
         ## load ##
         # q
-        in_q_offset = in_qkv_ptr + (block_offset + index) * (q_size + 2 * kv_size)
+        in_q_offset = in_qkv_ptr + (block_offset + index) * (q_size + gate_size + 2 * kv_size)
         in_q_tensor = tl.load(in_q_offset + tl.arange(0, q_size)).to(tl.float32).reshape(num_q_heads, head_size)
 
         # k
-        in_k_offset = in_qkv_ptr + (block_offset + index) * (q_size + 2 * kv_size) + q_size
+        in_k_offset = in_q_offset + q_size + gate_size
         in_k_tensor = tl.load(in_k_offset + tl.arange(0, kv_size)).to(tl.float32).reshape(num_kv_heads, head_size)
         # v
-        in_v_offset = in_qkv_ptr + (block_offset + index) * (q_size + 2 * kv_size) + q_size + kv_size
+        in_v_offset = in_k_offset + kv_size
         in_v_tensor = tl.load(in_v_offset + tl.arange(0, kv_size))
 
         # cos, sin
@@ -276,11 +277,7 @@ def triton_split_qkv_rmsnorm_mrope(
     kv_size = num_kv_heads * head_size
     num_tokens = qkv.shape[0]
 
-    if has_gate:
-        q_data = qkv[:, :q_size]
-        k_data = qkv[:, 2 * q_size:2 * q_size + kv_size]
-        v_data = qkv[:, 2 * q_size + kv_size:]
-        qkv = torch.cat([q_data, k_data, v_data], dim=-1)
+    gate_size = q_size if has_gate else 0
 
     if rope_dim is None:
         rope_dim = head_size
@@ -337,6 +334,7 @@ def triton_split_qkv_rmsnorm_mrope(
         rope_dim,
         rope_dim // 2,
         IS_PARTIAL_ROPE,
+        gate_size,
     )
 
     return q_output, k_output, v_output
