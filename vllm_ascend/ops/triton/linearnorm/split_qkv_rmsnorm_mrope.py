@@ -55,6 +55,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     rope_dim: tl.constexpr,
     half_rope_dim: tl.constexpr,
     IS_PARTIAL_ROPE: tl.constexpr,
+    has_gate: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
 
@@ -77,15 +78,23 @@ def split_qkv_rmsnorm_mrope_kernel(
 
     for index in range(loop_num):
         ## load ##
+        if has_gate:
+            qkv_stride = 2 * q_size + 2 * kv_size
+        else:
+            qkv_stride = q_size + 2 * kv_size
+
         # q
-        in_q_offset = in_qkv_ptr + (block_offset + index) * (q_size + 2 * kv_size)
+        in_q_offset = in_qkv_ptr + (block_offset + index) * qkv_stride
         in_q_tensor = tl.load(in_q_offset + tl.arange(0, q_size)).to(tl.float32).reshape(num_q_heads, head_size)
 
-        # k
-        in_k_offset = in_qkv_ptr + (block_offset + index) * (q_size + 2 * kv_size) + q_size
+        # k (skip gate when has_gate)
+        if has_gate:
+            in_k_offset = in_qkv_ptr + (block_offset + index) * qkv_stride + 2 * q_size
+        else:
+            in_k_offset = in_qkv_ptr + (block_offset + index) * qkv_stride + q_size
         in_k_tensor = tl.load(in_k_offset + tl.arange(0, kv_size)).to(tl.float32).reshape(num_kv_heads, head_size)
         # v
-        in_v_offset = in_qkv_ptr + (block_offset + index) * (q_size + 2 * kv_size) + q_size + kv_size
+        in_v_offset = in_k_offset + kv_size
         in_v_tensor = tl.load(in_v_offset + tl.arange(0, kv_size))
 
         # cos, sin
@@ -268,6 +277,7 @@ def triton_split_qkv_rmsnorm_mrope(
     rope_dim: int | None = None,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
+    has_gate: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     core_num = get_vectorcore_num()
 
@@ -330,6 +340,7 @@ def triton_split_qkv_rmsnorm_mrope(
         rope_dim,
         rope_dim // 2,
         IS_PARTIAL_ROPE,
+        has_gate,
     )
 
     return q_output, k_output, v_output
@@ -347,6 +358,7 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     mrope_section: list[int],
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
+    has_gate: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = qkv.shape[0]
     q_size = num_q_heads * head_size
