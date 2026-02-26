@@ -37,6 +37,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     out_q_ptr: torch.Tensor,
     out_k_ptr: torch.Tensor,
     out_v_ptr: torch.Tensor,
+    out_gate_ptr: torch.Tensor,
     num_tokens,
     front_core_num,
     num_tokens_each_front_core,
@@ -81,6 +82,11 @@ def split_qkv_rmsnorm_mrope_kernel(
         # q
         in_q_offset = in_qkv_ptr + (block_offset + index) * (q_size + gate_size + 2 * kv_size)
         in_q_tensor = tl.load(in_q_offset + tl.arange(0, q_size)).to(tl.float32).reshape(num_q_heads, head_size)
+
+        # gate
+        if gate_size > 0:
+            in_gate_offset = in_q_offset + q_size
+            in_gate_tensor = tl.load(in_gate_offset + tl.arange(0, gate_size))
 
         # k
         in_k_offset = in_q_offset + q_size + gate_size
@@ -254,6 +260,11 @@ def split_qkv_rmsnorm_mrope_kernel(
         out_v_offset = out_v_ptr + (block_offset + index) * kv_size
         tl.store(out_v_offset + tl.arange(0, kv_size), in_v_tensor)
 
+        # out_gate
+        if gate_size > 0:
+            out_gate_offset = out_gate_ptr + (block_offset + index) * gate_size
+            tl.store(out_gate_offset + tl.arange(0, gate_size), in_gate_tensor)
+
 
 def triton_split_qkv_rmsnorm_mrope(
     qkv: torch.Tensor,
@@ -270,7 +281,7 @@ def triton_split_qkv_rmsnorm_mrope(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     core_num = get_vectorcore_num()
 
     q_size = num_q_heads * head_size
@@ -298,6 +309,7 @@ def triton_split_qkv_rmsnorm_mrope(
     q_output = torch.empty(num_tokens, q_size, device=qkv.device, dtype=qkv.dtype)
     k_output = torch.empty(num_tokens, kv_size, device=qkv.device, dtype=qkv.dtype)
     v_output = torch.empty(num_tokens, kv_size, device=qkv.device, dtype=qkv.dtype)
+    gate_output = torch.empty(num_tokens, gate_size, device=qkv.device, dtype=qkv.dtype)
 
     total_core = front_core_num + tail_core_num
     block_dim = core_num
@@ -316,6 +328,7 @@ def triton_split_qkv_rmsnorm_mrope(
         q_output,
         k_output,
         v_output,
+        gate_output,
         num_tokens,
         front_core_num,
         num_tokens_each_front_core,
@@ -337,7 +350,7 @@ def triton_split_qkv_rmsnorm_mrope(
         gate_size,
     )
 
-    return q_output, k_output, v_output
+    return q_output, k_output, v_output, gate_output
 
 
 def triton_split_qkv_rmsnorm_mrope_fake(
@@ -353,10 +366,11 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = qkv.shape[0]
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
+    gate_size = q_size if has_gate else 0
 
     q_output = torch.empty(
         num_tokens,
@@ -379,7 +393,14 @@ def triton_split_qkv_rmsnorm_mrope_fake(
         dtype=qkv.dtype,
     )
 
-    return q_output, k_output, v_output
+    gate_output = torch.empty(
+        num_tokens,
+        gate_size,
+        device=qkv.device,
+        dtype=qkv.dtype,
+    )
+
+    return q_output, k_output, v_output, gate_output
 
 
 direct_register_custom_op(
