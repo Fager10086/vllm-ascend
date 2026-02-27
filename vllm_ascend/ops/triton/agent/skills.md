@@ -22,9 +22,13 @@ UB是vector核计算时的动态存储单元，每个kernel处理数据时，需
 - 不能load多行离散数据，需要一行一行load。
 - 少用tl.where语句，因为tl.where主要处理离散数据，性能较差。
 - 需要保证传给triton算子的tensor连续，比如cos,sin=cos_sin_cache.index_select(0,positions).view(num_tokens,2,rope_size//2).repeat(1,1,2).chunk(2,dim=2)，此时cos，sin指向cos_sin_cache，并不是单独的tensor，需要contiguous操作将cos，sin变成单独的tensor。
+- 避免对同一个tensor多次insert_slice，防止不可预知的错误。
 
 # 开发心得
-    - 与ascend C的分核方式不同，每次核函数load和save tensor的时候都需要使用mask，通过mask来处理不需要计算的尾块。
+    - 与ascend C的分核方式不同，每次核函数load和save tensor的时候都需要使用mask，通过mask来处理不需要计算的尾块。通过mask后得到的tensor的shape每个核都一样。
+    - 对于index_select这种取不连续地址的操作，只能循环一行一行地取，否则会产生大量的scalar计算（计算二维掩码）。
+    - tl.arange操作对二维tensor的索引运算有优化。如果直接从gm中读取离散的行数据，进行二维数组的运算，会导致大量的scalar，计算非常耗时。
+    - triton通过grid进行分核操作，当分核数大于可用的计算核心时，会进行循环操作，建议将这个循环操作放到kernel函数来处理，每个计算核心均匀分配计算量，能提升性能。
 
 # 问题定位解决
 - 流水异常的可能原因：
