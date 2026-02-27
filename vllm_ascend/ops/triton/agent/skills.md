@@ -12,3 +12,4 @@ UB是vector核计算时的动态存储单元，每个kernel处理数据时，需
 - 在开发算子或者优化算子性能时，不能使用入图的方式来提升单算子性能，因为模型侧会整网入图或者Picewise方式多个算子入图。对于单个算子，我们应该关注的是单算子模式下的基础功能和性能，而不能将入图操作写在辅助函数里。
 - tl.load在使用mask参数时，可能会导致MTE搬运单元和vector计算单元无法并行，是由于mask对输入数据的筛选操作导致，一种解决方案是：在tl.load时不使用mask，在load之后再使用tl.where和mask组合进行掩码，但会引入额外的scalar计算，因此，当要访问的内存规则连续时，可以使用tl.insert_slice来作为性能优化方案进行替代。
 - triton对于kernel内的if-else分支，在编译时会要求两个分支的同名变量的shape相同，当在if-else分支报错时，可排查此项规则。
+- 保证在不超过ub buffer的情况和使用了double buffer的特性下，triton需要load多行连续数据
