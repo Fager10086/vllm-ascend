@@ -1,5 +1,5 @@
 # Triton Ascend算子开发指南
-https://triton-ascend-test.readthedocs.io/zh-cn/latest/，该网页下的各个子目录对Triton Ascend算子的基础开发指南进行了解释说明，包括但不限于triton函数的用法、示例，以及算子调试与调优的方法。
+https://triton-ascend-test.readthedocs.io/zh-cn/latest/， 该网页下的各个子目录对Triton Ascend算子的基础开发指南进行了解释说明，包括但不限于triton函数的用法、示例，以及算子调试与调优的方法。
 
 # 硬件限制
 对于Vector类算子在昇腾NPU上的迁移，需要考虑到的硬件限制有：vector核的数量以及UB（Unified Buffer）大小。
