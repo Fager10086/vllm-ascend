@@ -6,10 +6,10 @@ vector核的数量有限，它决定了program id的数量以及每个id的kerne
 UB是vector核计算时的动态存储单元，每个kernel处理数据时，需要将数据从GB（Global Buffer）通过tl.load方式读取到UB中，kernel操作UB中的数据，包括涉及到的中间变量统统都是在UB上存储的，当kernel计算完成，通过tl.store将输出从UB存回GB中。
 - 由于UB大小受限，因此kernel同时处理的数据是有限的，我们需要将kernel内的数据进行切分，以循环的形式分批处理数据，对于循环切分的策略（即每次循环处理的数据大小切分策略），一般是尽可能地让单次循环所占用（即同时占用）的UB大小尽可能大，但必须小于UB大小的一半，以利用double buffer特性实现流水并行，举个例子，910B的UB大小为192KB，因此我们将单个kernel单次循环的UB占用量控制在85KB左右（192KB // 2，并且还要给出一部分余量用来存放一些小的变量），依据这个占用量，我们能够在辅助函数中计算出每次循环分块的大小（例如单次循环几个token）。
 - 计算需要考虑到的变量包括：kernel内的循环体内外的load进来的变量、以及kernel的中间变量，这些均会占用UB，并且需要考虑数据类型，不同数据类型占用的UB大小不一。循环在上述约束的基础上尽可能多的处理数据，如果UB计算不合理，会导致ub overflow或者ub address out of bounds等报错。
-- 
 
 # 开发规则约束
 - 在开发算子或者优化算子性能时，不能使用入图的方式来提升单算子性能，因为模型侧会整网入图或者Picewise方式多个算子入图。对于单个算子，我们应该关注的是单算子模式下的基础功能和性能，而不能将入图操作写在辅助函数里。
 - tl.load在使用mask参数时，可能会导致MTE搬运单元和vector计算单元无法并行，是由于mask对输入数据的筛选操作导致，一种解决方案是：在tl.load时不使用mask，在load之后再使用tl.where和mask组合进行掩码，但会引入额外的scalar计算，因此，当要访问的内存规则连续时，可以使用tl.insert_slice来作为性能优化方案进行替代。
 - triton对于kernel内的if-else分支，在编译时会要求两个分支的同名变量的shape相同，当在if-else分支报错时，可排查此项规则。
 - 保证在不超过ub buffer的情况和使用了double buffer的特性下，triton需要load多行连续数据
+- scalar运算会拖慢vector算子的性能，需要减少kernel内的scalar运算。把与kernel pid和循环变量无关的scalar运算提取到辅助函数中，把与循环变量无关的scalar运算提取到循环外，能合并的scalar运算就合并。
