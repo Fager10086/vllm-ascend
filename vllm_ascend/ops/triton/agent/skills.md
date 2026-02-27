@@ -13,3 +13,5 @@ UB是vector核计算时的动态存储单元，每个kernel处理数据时，需
 - triton对于kernel内的if-else分支，在编译时会要求两个分支的同名变量的shape相同，当在if-else分支报错时，可排查此项规则。
 - 保证在不超过ub buffer的情况和使用了double buffer的特性下，triton需要load多行连续数据
 - scalar运算会拖慢vector算子的性能，需要减少kernel内的scalar运算。把与kernel pid和循环变量无关的scalar运算提取到辅助函数中，把与循环变量无关的scalar运算提取到循环外，能合并的scalar运算就合并。
+- 不能load多行离散数据，需要一行一行load
+- 少用tl.where语句，因为tl.where主要处理离散数据，性能较差
