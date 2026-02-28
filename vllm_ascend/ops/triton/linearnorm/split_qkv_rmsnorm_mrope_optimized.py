@@ -16,6 +16,8 @@
 #
 
 
+import math
+
 import torch
 import triton  # type: ignore
 import triton.language as tl  # type: ignore
@@ -23,9 +25,65 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
+ASCEND_UB_BYTES = 256 * 1024
+UB_SAFETY_FACTOR = 0.8
+
+
+def compute_tile_tokens(
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    rope_dim: int,
+    ub_bytes: int = ASCEND_UB_BYTES,
+) -> int:
+    """Dynamically compute how many tokens one vector-core can process
+    per iteration based on kernel UB footprint and hardware UB capacity.
+
+    The estimation enumerates all tensors that are simultaneously live in
+    UB at peak usage (Q rmsnorm + rope phase while K data is waiting):
+
+    Per-token live tensors (bytes):
+      - Q input fp32:               q_size * 4
+      - Q normalized fp32:          q_size * 4
+      - K input fp32 (waiting):     kv_size * 4
+      - V passthrough bf16:         kv_size * 2
+      - cos/sin fp32:               rope_dim * 4 * 2
+      - rope scratch (cat_x) fp32:  num_q_heads * rope_dim * 4
+      - output Q bf16:              q_size * 2
+      - output K bf16:              kv_size * 2
+      - output V bf16:              kv_size * 2
+
+    Shared (loop-invariant, loaded once):
+      - rmsnorm weights fp32:       head_size * 4 * 2
+      - biases fp32 (worst case):   head_size * 4 * 2
+    """
+    q_size = num_q_heads * head_size
+    kv_size = num_kv_heads * head_size
+
+    shared_bytes = head_size * 4 * 4
+
+    per_token_bytes = (
+        q_size * 4                      # Q input fp32
+        + q_size * 4                    # Q normalized fp32
+        + kv_size * 4                   # K input fp32 (loaded, waiting)
+        + kv_size * 2                   # V passthrough bf16
+        + rope_dim * 4 * 2              # cos + sin fp32
+        + num_q_heads * rope_dim * 4    # rope scratch (cat_x) fp32
+        + q_size * 2                    # output Q bf16
+        + kv_size * 2                   # output K bf16
+        + kv_size * 2                   # output V bf16
+    )
+
+    available = int((ub_bytes - shared_bytes) * UB_SAFETY_FACTOR)
+    tile = max(1, available // per_token_bytes)
+    tile = 1 << int(math.log2(tile))
+    return max(1, tile)
+
 
 @triton.jit(
-    do_not_specialize=["num_tokens", "front_core_num", "num_tokens_each_front_core", "num_tokens_each_tail_core"]
+    do_not_specialize=["num_tokens", "front_core_num",
+                       "num_tokens_each_front_core",
+                       "num_tokens_each_tail_core"]
 )
 def split_qkv_rmsnorm_mrope_kernel(
     in_qkv_ptr: torch.Tensor,
@@ -55,6 +113,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     rope_dim: tl.constexpr,
     half_rope_dim: tl.constexpr,
     IS_PARTIAL_ROPE: tl.constexpr,
+    TILE_TOKENS: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
 
@@ -65,7 +124,8 @@ def split_qkv_rmsnorm_mrope_kernel(
     block_offset = num_tokens_each_front_core * block_idx
     if block_idx >= front_core_num:
         block_offset = (
-            num_tokens_each_front_core * front_core_num + (block_idx - front_core_num) * num_tokens_each_tail_core
+            num_tokens_each_front_core * front_core_num
+            + (block_idx - front_core_num) * num_tokens_each_tail_core
         )
 
     q_rmsnorm_weight = tl.load(q_weight_ptr + tl.arange(0, head_size))
@@ -82,176 +142,154 @@ def split_qkv_rmsnorm_mrope_kernel(
         t_mask = ~(h_mask | w_mask)
     else:
         t_mask = cos_offsets < mrope_section_t
-        h_mask = (mrope_section_t - 1 < cos_offsets) & (cos_offsets < mrope_section_t + mrope_section_h)
-        w_mask = (mrope_section_t + mrope_section_h - 1 < cos_offsets) & (
-            cos_offsets < mrope_section_t + mrope_section_h + mrope_section_w
+        h_mask = (
+            (mrope_section_t - 1 < cos_offsets)
+            & (cos_offsets < mrope_section_t + mrope_section_h)
+        )
+        w_mask = (
+            (mrope_section_t + mrope_section_h - 1 < cos_offsets)
+            & (cos_offsets < mrope_section_t + mrope_section_h + mrope_section_w)
         )
 
-    for index in range(loop_num):
-        ## load ##
-        # q
-        in_q_offset = in_qkv_ptr + (block_offset + index) * (q_size + 2 * kv_size)
-        in_q_tensor = tl.load(in_q_offset + tl.arange(0, q_size)).to(tl.float32).reshape(num_q_heads, head_size)
+    TILE_Q_HEADS: tl.constexpr = TILE_TOKENS * num_q_heads
+    TILE_KV_HEADS: tl.constexpr = TILE_TOKENS * num_kv_heads
+    qkv_stride: tl.constexpr = q_size + 2 * kv_size
 
-        # k
-        in_k_offset = in_qkv_ptr + (block_offset + index) * (q_size + 2 * kv_size) + q_size
-        in_k_tensor = tl.load(in_k_offset + tl.arange(0, kv_size)).to(tl.float32).reshape(num_kv_heads, head_size)
-        # v
-        in_v_offset = in_qkv_ptr + (block_offset + index) * (q_size + 2 * kv_size) + q_size + kv_size
-        in_v_tensor = tl.load(in_v_offset + tl.arange(0, kv_size))
+    tile_offsets = tl.arange(0, TILE_TOKENS)
+    q_elem = tl.arange(0, q_size)
+    kv_elem = tl.arange(0, kv_size)
 
-        # cos, sin
-        t_cos_offset = cos_sin_ptr + (block_offset + index) * rope_dim
-        h_cos_offset = t_cos_offset + num_tokens * rope_dim
-        w_cos_offset = h_cos_offset + num_tokens * rope_dim
+    for tile_start in range(0, loop_num, TILE_TOKENS):
+        valid = (tile_start + tile_offsets) < loop_num
+        token_ids = block_offset + tile_start + tile_offsets
 
-        t_sin_offset = cos_sin_ptr + (block_offset + index) * rope_dim + half_rope_dim
-        h_sin_offset = t_sin_offset + num_tokens * rope_dim
-        w_sin_offset = h_sin_offset + num_tokens * rope_dim
+        # ========== Load Q (TILE_TOKENS, q_size) -> (TILE_Q_HEADS, head_size) ==========
+        q_ptrs = in_qkv_ptr + token_ids[:, None] * qkv_stride + q_elem[None, :]
+        in_q = tl.load(q_ptrs, mask=valid[:, None], other=0).to(tl.float32)
+        in_q = in_q.reshape(TILE_Q_HEADS, head_size)
 
-        t_cos_tensor = tl.load(t_cos_offset + cos_offsets, mask=t_mask, other=0)
-        h_cos_tensor = tl.load(h_cos_offset + cos_offsets, mask=h_mask, other=0)
-        w_cos_tensor = tl.load(w_cos_offset + cos_offsets, mask=w_mask, other=0)
-        t_sin_tensor = tl.load(t_sin_offset + cos_offsets, mask=t_mask, other=0)
-        h_sin_tensor = tl.load(h_sin_offset + cos_offsets, mask=h_mask, other=0)
-        w_sin_tensor = tl.load(w_sin_offset + cos_offsets, mask=w_mask, other=0)
+        # ========== Load K (TILE_TOKENS, kv_size) -> (TILE_KV_HEADS, head_size) ==========
+        k_ptrs = in_qkv_ptr + token_ids[:, None] * qkv_stride + q_size + kv_elem[None, :]
+        in_k = tl.load(k_ptrs, mask=valid[:, None], other=0).to(tl.float32)
+        in_k = in_k.reshape(TILE_KV_HEADS, head_size)
 
-        cos_tensor = (t_cos_tensor + h_cos_tensor + w_cos_tensor).to(tl.float32).reshape(1, half_rope_dim)
-        cos_tensor = tl.broadcast_to(cos_tensor, (2, half_rope_dim)).reshape(1, rope_dim)
+        # ========== Load & Store V (passthrough) ==========
+        v_ptrs = in_qkv_ptr + token_ids[:, None] * qkv_stride + q_size + kv_size + kv_elem[None, :]
+        in_v = tl.load(v_ptrs, mask=valid[:, None], other=0)
+        v_out_ptrs = out_v_ptr + token_ids[:, None] * kv_size + kv_elem[None, :]
+        tl.store(v_out_ptrs, in_v, mask=valid[:, None])
 
-        sin_tensor = (t_sin_tensor + h_sin_tensor + w_sin_tensor).to(tl.float32).reshape(1, half_rope_dim)
-        sin_tensor = tl.broadcast_to(sin_tensor, (2, half_rope_dim)).reshape(1, rope_dim)
+        # ========== Load cos/sin for tile (TILE_TOKENS, half_rope_dim) ==========
+        cos_bases = token_ids * rope_dim
+        t_cos_2d = cos_sin_ptr + cos_bases[:, None] + cos_offsets[None, :]
+        h_cos_2d = t_cos_2d + num_tokens * rope_dim
+        w_cos_2d = h_cos_2d + num_tokens * rope_dim
+        t_sin_2d = cos_sin_ptr + cos_bases[:, None] + half_rope_dim + cos_offsets[None, :]
+        h_sin_2d = t_sin_2d + num_tokens * rope_dim
+        w_sin_2d = h_sin_2d + num_tokens * rope_dim
 
-        ## compute ##
-        # q-rmsnorm
-        squares = in_q_tensor * in_q_tensor
-        variances = tl.sum(squares, axis=1) / head_size
-        reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(num_q_heads, 1)
-        q_normalized = in_q_tensor * reciprocal_std
-        q_normalized = q_normalized * q_rmsnorm_weight
+        vm_t = valid[:, None] & t_mask[None, :]
+        vm_h = valid[:, None] & h_mask[None, :]
+        vm_w = valid[:, None] & w_mask[None, :]
+
+        cos_half = (
+            tl.load(t_cos_2d, mask=vm_t, other=0)
+            + tl.load(h_cos_2d, mask=vm_h, other=0)
+            + tl.load(w_cos_2d, mask=vm_w, other=0)
+        ).to(tl.float32)
+        sin_half = (
+            tl.load(t_sin_2d, mask=vm_t, other=0)
+            + tl.load(h_sin_2d, mask=vm_h, other=0)
+            + tl.load(w_sin_2d, mask=vm_w, other=0)
+        ).to(tl.float32)
+
+        cos_tile = tl.broadcast_to(
+            cos_half.reshape(TILE_TOKENS, 1, half_rope_dim),
+            (TILE_TOKENS, 2, half_rope_dim),
+        ).reshape(TILE_TOKENS, rope_dim)
+        sin_tile = tl.broadcast_to(
+            sin_half.reshape(TILE_TOKENS, 1, half_rope_dim),
+            (TILE_TOKENS, 2, half_rope_dim),
+        ).reshape(TILE_TOKENS, rope_dim)
+
+        q_cos = tl.broadcast_to(
+            cos_tile.reshape(TILE_TOKENS, 1, rope_dim),
+            (TILE_TOKENS, num_q_heads, rope_dim),
+        ).reshape(TILE_Q_HEADS, rope_dim)
+        q_sin = tl.broadcast_to(
+            sin_tile.reshape(TILE_TOKENS, 1, rope_dim),
+            (TILE_TOKENS, num_q_heads, rope_dim),
+        ).reshape(TILE_Q_HEADS, rope_dim)
+        k_cos = tl.broadcast_to(
+            cos_tile.reshape(TILE_TOKENS, 1, rope_dim),
+            (TILE_TOKENS, num_kv_heads, rope_dim),
+        ).reshape(TILE_KV_HEADS, rope_dim)
+        k_sin = tl.broadcast_to(
+            sin_tile.reshape(TILE_TOKENS, 1, rope_dim),
+            (TILE_TOKENS, num_kv_heads, rope_dim),
+        ).reshape(TILE_KV_HEADS, rope_dim)
+
+        # ========== Q RMSNorm ==========
+        sq = in_q * in_q
+        var_q = tl.sum(sq, axis=1) / head_size
+        rstd_q = (1 / tl.sqrt(var_q + eps)).reshape(TILE_Q_HEADS, 1)
+        q_norm = in_q * rstd_q * q_rmsnorm_weight
         if has_bias:
-            q_normalized = q_normalized + q_bias
+            q_norm = q_norm + q_bias
 
-        # k-rmsnorm
-        squares = in_k_tensor * in_k_tensor
-        variances = tl.sum(squares, axis=1) / head_size
-        reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(num_kv_heads, 1)
-        k_normalized = in_k_tensor * reciprocal_std
-        k_normalized = k_normalized * k_rmsnorm_weight
+        # ========== K RMSNorm ==========
+        sk = in_k * in_k
+        var_k = tl.sum(sk, axis=1) / head_size
+        rstd_k = (1 / tl.sqrt(var_k + eps)).reshape(TILE_KV_HEADS, 1)
+        k_norm = in_k * rstd_k * k_rmsnorm_weight
         if has_bias:
-            k_normalized = k_normalized + k_bias
+            k_norm = k_norm + k_bias
 
-        # q-mrope
-        x1 = tl.extract_slice(
-            q_normalized,
-            offsets=(0, 0),
-            sizes=(num_q_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        x2 = tl.extract_slice(
-            q_normalized,
-            offsets=(0, half_rope_dim),
-            sizes=(num_q_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        cat_x = tl.zeros((num_q_heads, rope_dim), dtype=tl.float32)
-        cat_x = tl.insert_slice(
-            cat_x,
-            -x2,
-            offsets=(0, 0),
-            sizes=(num_q_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        cat_x = tl.insert_slice(
-            cat_x,
-            x1,
-            offsets=(0, half_rope_dim),
-            sizes=(num_q_heads, half_rope_dim),
-            strides=(1, 1),
-        )
+        # ========== Q MRoPE ==========
+        qx1 = tl.extract_slice(q_norm, (0, 0), (TILE_Q_HEADS, half_rope_dim), (1, 1))
+        qx2 = tl.extract_slice(q_norm, (0, half_rope_dim), (TILE_Q_HEADS, half_rope_dim), (1, 1))
+        cat_q = tl.zeros((TILE_Q_HEADS, rope_dim), dtype=tl.float32)
+        cat_q = tl.insert_slice(cat_q, -qx2, (0, 0), (TILE_Q_HEADS, half_rope_dim), (1, 1))
+        cat_q = tl.insert_slice(cat_q, qx1, (0, half_rope_dim), (TILE_Q_HEADS, half_rope_dim), (1, 1))
         if IS_PARTIAL_ROPE:
-            orig_qk = tl.extract_slice(
-                q_normalized,
-                offsets=(0, 0),
-                sizes=(num_q_heads, rope_dim),
-                strides=(1, 1),
-            )
+            orig_q = tl.extract_slice(q_norm, (0, 0), (TILE_Q_HEADS, rope_dim), (1, 1))
         else:
-            orig_qk = q_normalized
-        roped_q = cat_x * sin_tensor + orig_qk * cos_tensor
+            orig_q = q_norm
+        roped_q = cat_q * q_sin + orig_q * q_cos
 
-        # k-mrope
-        y1 = tl.extract_slice(
-            k_normalized,
-            offsets=(0, 0),
-            sizes=(num_kv_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        y2 = tl.extract_slice(
-            k_normalized,
-            offsets=(0, half_rope_dim),
-            sizes=(num_kv_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        cat_y = tl.zeros((num_kv_heads, rope_dim), dtype=tl.float32)
-        cat_y = tl.insert_slice(
-            cat_y,
-            -y2,
-            offsets=(0, 0),
-            sizes=(num_kv_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        cat_y = tl.insert_slice(
-            cat_y,
-            y1,
-            offsets=(0, half_rope_dim),
-            sizes=(num_kv_heads, half_rope_dim),
-            strides=(1, 1),
-        )
+        # ========== K MRoPE ==========
+        ky1 = tl.extract_slice(k_norm, (0, 0), (TILE_KV_HEADS, half_rope_dim), (1, 1))
+        ky2 = tl.extract_slice(k_norm, (0, half_rope_dim), (TILE_KV_HEADS, half_rope_dim), (1, 1))
+        cat_k = tl.zeros((TILE_KV_HEADS, rope_dim), dtype=tl.float32)
+        cat_k = tl.insert_slice(cat_k, -ky2, (0, 0), (TILE_KV_HEADS, half_rope_dim), (1, 1))
+        cat_k = tl.insert_slice(cat_k, ky1, (0, half_rope_dim), (TILE_KV_HEADS, half_rope_dim), (1, 1))
         if IS_PARTIAL_ROPE:
-            orig_qk = tl.extract_slice(
-                k_normalized,
-                offsets=(0, 0),
-                sizes=(num_kv_heads, rope_dim),
-                strides=(1, 1),
-            )
+            orig_k = tl.extract_slice(k_norm, (0, 0), (TILE_KV_HEADS, rope_dim), (1, 1))
         else:
-            orig_qk = k_normalized
-        roped_k = cat_y * sin_tensor + orig_qk * cos_tensor
+            orig_k = k_norm
+        roped_k = cat_k * k_sin + orig_k * k_cos
 
+        # ========== Apply partial rope & dtype cast ==========
         if IS_PARTIAL_ROPE:
-            q_normalized = tl.insert_slice(
-                q_normalized,
-                roped_q,
-                offsets=(0, 0),
-                sizes=(num_q_heads, rope_dim),
-                strides=(1, 1),
+            q_norm = tl.insert_slice(
+                q_norm, roped_q, (0, 0), (TILE_Q_HEADS, rope_dim), (1, 1),
             ).to(tl.bfloat16)
-            k_normalized = tl.insert_slice(
-                k_normalized,
-                roped_k,
-                offsets=(0, 0),
-                sizes=(num_kv_heads, rope_dim),
-                strides=(1, 1),
+            k_norm = tl.insert_slice(
+                k_norm, roped_k, (0, 0), (TILE_KV_HEADS, rope_dim), (1, 1),
             ).to(tl.bfloat16)
         else:
-            q_normalized = roped_q.to(tl.bfloat16)
-            k_normalized = roped_k.to(tl.bfloat16)
+            q_norm = roped_q.to(tl.bfloat16)
+            k_norm = roped_k.to(tl.bfloat16)
 
-        ## store ##
-        # out_q
-        out_q_offset = out_q_ptr + (block_offset + index) * q_size
-        out_q_indices = tl.arange(0, q_size)
-        tl.store(out_q_offset + out_q_indices, q_normalized.reshape(q_size))
+        # ========== Store Q ==========
+        q_out = q_norm.reshape(TILE_TOKENS, q_size)
+        q_out_ptrs = out_q_ptr + token_ids[:, None] * q_size + q_elem[None, :]
+        tl.store(q_out_ptrs, q_out, mask=valid[:, None])
 
-        # out_k
-        out_k_offset = out_k_ptr + (block_offset + index) * kv_size
-        out_k_indices = tl.arange(0, kv_size)
-        tl.store(out_k_offset + out_k_indices, k_normalized.reshape(kv_size))
-
-        # out_v
-        out_v_offset = out_v_ptr + (block_offset + index) * kv_size
-        tl.store(out_v_offset + tl.arange(0, kv_size), in_v_tensor)
+        # ========== Store K ==========
+        k_out = k_norm.reshape(TILE_TOKENS, kv_size)
+        k_out_ptrs = out_k_ptr + token_ids[:, None] * kv_size + kv_elem[None, :]
+        tl.store(k_out_ptrs, k_out, mask=valid[:, None])
 
 
 def triton_split_qkv_rmsnorm_mrope(
@@ -302,6 +340,8 @@ def triton_split_qkv_rmsnorm_mrope(
 
     has_bias = q_bias is not None
 
+    tile_tokens = compute_tile_tokens(num_q_heads, num_kv_heads, head_size, rope_dim)
+
     split_qkv_rmsnorm_mrope_kernel[(block_dim,)](
         qkv,
         q_weight,
@@ -330,6 +370,7 @@ def triton_split_qkv_rmsnorm_mrope(
         rope_dim,
         rope_dim // 2,
         IS_PARTIAL_ROPE,
+        tile_tokens,
     )
 
     return q_output, k_output, v_output
