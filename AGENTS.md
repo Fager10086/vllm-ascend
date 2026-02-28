@@ -365,3 +365,11 @@ Before merging, verify:
 - [vLLM Hardware Plugin RFC](https://github.com/vllm-project/vllm/issues/11162)
 - [Documentation](https://docs.vllm.ai/projects/ascend/en/latest/)
 - [Contributors Guide](https://docs.vllm.ai/projects/ascend/en/latest/community/contributors.html)
+
+---
+
+## Skills
+
+Custom skills located at `.skills/` directory.
+
+- triton-ascend: 指导 Triton Ascend 算子在昇腾 NPU 上的开发与性能优化，用户提到 Triton Ascend、triton 算子开发、NPU triton、昇腾 triton、triton kernel 编写、triton 性能优化、UB overflow、triton 调试时触发
