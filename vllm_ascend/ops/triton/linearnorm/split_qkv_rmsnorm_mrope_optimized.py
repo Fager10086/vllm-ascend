@@ -24,6 +24,71 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
+@triton.jit
+def _rmsnorm_rope_store(
+    data,
+    rmsnorm_weight,
+    bias,
+    cos_tensor,
+    sin_tensor,
+    out_ptr,
+    out_offset,
+    num_heads: tl.constexpr,
+    head_size: tl.constexpr,
+    total_size: tl.constexpr,
+    eps: tl.constexpr,
+    half_rope_dim: tl.constexpr,
+    rope_dim: tl.constexpr,
+    has_bias: tl.constexpr,
+    IS_PARTIAL_ROPE: tl.constexpr,
+):
+    squares = data * data
+    variances = tl.sum(squares, axis=1) / head_size
+    reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(num_heads, 1)
+    data = data * reciprocal_std
+    data = data * rmsnorm_weight
+    if has_bias:
+        data = data + bias
+
+    x1 = tl.extract_slice(
+        data,
+        offsets=(0, 0),
+        sizes=(num_heads, half_rope_dim),
+        strides=(1, 1),
+    )
+    x2 = tl.extract_slice(
+        data,
+        offsets=(0, half_rope_dim),
+        sizes=(num_heads, half_rope_dim),
+        strides=(1, 1),
+    )
+    rot = tl.join(-x2, x1).reshape(num_heads, rope_dim)
+
+    if IS_PARTIAL_ROPE:
+        orig = tl.extract_slice(
+            data,
+            offsets=(0, 0),
+            sizes=(num_heads, rope_dim),
+            strides=(1, 1),
+        )
+    else:
+        orig = data
+    roped = rot * sin_tensor + orig * cos_tensor
+
+    if IS_PARTIAL_ROPE:
+        data = tl.insert_slice(
+            data,
+            roped,
+            offsets=(0, 0),
+            sizes=(num_heads, rope_dim),
+            strides=(1, 1),
+        ).to(tl.bfloat16)
+    else:
+        data = roped.to(tl.bfloat16)
+
+    tl.store(out_ptr + out_offset + tl.arange(0, total_size), data.reshape(total_size))
+
+
 @triton.jit(
     do_not_specialize=["num_tokens", "front_core_num", "num_tokens_each_front_core", "num_tokens_each_tail_core"]
 )
@@ -65,7 +130,8 @@ def split_qkv_rmsnorm_mrope_kernel(
     block_offset = num_tokens_each_front_core * block_idx
     if block_idx >= front_core_num:
         block_offset = (
-            num_tokens_each_front_core * front_core_num + (block_idx - front_core_num) * num_tokens_each_tail_core
+            num_tokens_each_front_core * front_core_num
+            + (block_idx - front_core_num) * num_tokens_each_tail_core
         )
 
     q_rmsnorm_weight = tl.load(q_weight_ptr + tl.arange(0, head_size))
@@ -74,12 +140,10 @@ def split_qkv_rmsnorm_mrope_kernel(
     if has_bias:
         q_bias = tl.load(q_bias_ptr + tl.arange(0, head_size))
         k_bias = tl.load(k_bias_ptr + tl.arange(0, head_size))
+    else:
+        q_bias = tl.zeros((head_size,), dtype=tl.float32)
+        k_bias = tl.zeros((head_size,), dtype=tl.float32)
 
-    # [P0-Fix-2] Hoist loop-invariant mask computation outside the loop.
-    # In the original kernel, cos_offsets / t_mask / h_mask / w_mask were
-    # recomputed every iteration despite being independent of the token
-    # index.  Moving them here eliminates redundant vector compare /
-    # logic instructions and the associated UB temporaries per iteration.
     cos_offsets = tl.arange(0, half_rope_dim)
     if is_interleaved:
         h_mask = ((cos_offsets % 3) == 1) & (cos_offsets <= 3 * mrope_section_h)
@@ -87,27 +151,24 @@ def split_qkv_rmsnorm_mrope_kernel(
         t_mask = ~(h_mask | w_mask)
     else:
         t_mask = cos_offsets < mrope_section_t
-        h_mask = (mrope_section_t - 1 < cos_offsets) & (cos_offsets < mrope_section_t + mrope_section_h)
-        w_mask = (mrope_section_t + mrope_section_h - 1 < cos_offsets) & (
-            cos_offsets < mrope_section_t + mrope_section_h + mrope_section_w
+        h_mask = (
+            (mrope_section_t - 1 < cos_offsets)
+            & (cos_offsets < mrope_section_t + mrope_section_h)
         )
+        w_mask = (
+            (mrope_section_t + mrope_section_h - 1 < cos_offsets)
+            & (cos_offsets < mrope_section_t + mrope_section_h + mrope_section_w)
+        )
+
+    qkv_stride = q_size + 2 * kv_size
 
     for index in range(loop_num):
         token_idx = block_offset + index
-        qkv_base = in_qkv_ptr + token_idx * (q_size + 2 * kv_size)
+        qkv_base = in_qkv_ptr + token_idx * qkv_stride
 
-        # [P0-Fix-1] Load V and store it back immediately so its UB
-        # allocation can be reclaimed before the heavier Q / K
-        # processing begins.  V is a pure copy -- keeping it alive
-        # throughout Q-RMSNorm / K-RMSNorm / RoPE wastes UB.
         in_v_tensor = tl.load(qkv_base + q_size + kv_size + tl.arange(0, kv_size))
         tl.store(out_v_ptr + token_idx * kv_size + tl.arange(0, kv_size), in_v_tensor)
 
-        # [P0-Fix-3] Replace masked loads with unconditional loads
-        # followed by tl.where.  On Ascend NPU, masked loads compile
-        # to conditional-DMA + select, which is slower than a plain
-        # DMA followed by a vector select.  We interleave load and
-        # accumulate so that cos/sin assembly pipelines better.
         t_cos_offset = cos_sin_ptr + token_idx * rope_dim
         h_cos_offset = t_cos_offset + num_tokens * rope_dim
         w_cos_offset = h_cos_offset + num_tokens * rope_dim
@@ -123,8 +184,8 @@ def split_qkv_rmsnorm_mrope_kernel(
         cos_tensor = cos_tensor + tl.where(h_mask, h_cos_raw, 0.0).to(tl.float32)
 
         w_cos_raw = tl.load(w_cos_offset + cos_offsets)
-        cos_tensor = (cos_tensor + tl.where(w_mask, w_cos_raw, 0.0).to(tl.float32)).reshape(1, half_rope_dim)
-        cos_tensor = tl.broadcast_to(cos_tensor, (2, half_rope_dim)).reshape(1, rope_dim)
+        cos_half = cos_tensor + tl.where(w_mask, w_cos_raw, 0.0).to(tl.float32)
+        cos_tensor = tl.join(cos_half, cos_half).reshape(1, rope_dim)
 
         t_sin_raw = tl.load(t_sin_offset + cos_offsets)
         sin_tensor = tl.where(t_mask, t_sin_raw, 0.0).to(tl.float32)
@@ -133,138 +194,24 @@ def split_qkv_rmsnorm_mrope_kernel(
         sin_tensor = sin_tensor + tl.where(h_mask, h_sin_raw, 0.0).to(tl.float32)
 
         w_sin_raw = tl.load(w_sin_offset + cos_offsets)
-        sin_tensor = (sin_tensor + tl.where(w_mask, w_sin_raw, 0.0).to(tl.float32)).reshape(1, half_rope_dim)
-        sin_tensor = tl.broadcast_to(sin_tensor, (2, half_rope_dim)).reshape(1, rope_dim)
+        sin_half = sin_tensor + tl.where(w_mask, w_sin_raw, 0.0).to(tl.float32)
+        sin_tensor = tl.join(sin_half, sin_half).reshape(1, rope_dim)
 
-        # [P0-Fix-1 contd.] Serialize Q and K processing so that only
-        # one of them occupies UB at any time.  The original kernel
-        # loaded both Q and K up-front, doubling peak UB usage.
-        # We also reuse the same variable name "data" for both Q and K
-        # to hint the compiler that the previous buffer can be freed.
-
-        # --- Q: load -> rmsnorm -> rope -> store ---
         data = tl.load(qkv_base + tl.arange(0, q_size)).to(tl.float32).reshape(num_q_heads, head_size)
-
-        squares = data * data
-        variances = tl.sum(squares, axis=1) / head_size
-        reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(num_q_heads, 1)
-        data = data * reciprocal_std
-        data = data * q_rmsnorm_weight
-        if has_bias:
-            data = data + q_bias
-
-        x1 = tl.extract_slice(
-            data,
-            offsets=(0, 0),
-            sizes=(num_q_heads, half_rope_dim),
-            strides=(1, 1),
+        _rmsnorm_rope_store(
+            data, q_rmsnorm_weight, q_bias, cos_tensor, sin_tensor,
+            out_q_ptr, token_idx * q_size,
+            num_q_heads, head_size, q_size, eps, half_rope_dim, rope_dim,
+            has_bias, IS_PARTIAL_ROPE,
         )
-        x2 = tl.extract_slice(
-            data,
-            offsets=(0, half_rope_dim),
-            sizes=(num_q_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        cat_x = tl.zeros((num_q_heads, rope_dim), dtype=tl.float32)
-        cat_x = tl.insert_slice(
-            cat_x,
-            -x2,
-            offsets=(0, 0),
-            sizes=(num_q_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        cat_x = tl.insert_slice(
-            cat_x,
-            x1,
-            offsets=(0, half_rope_dim),
-            sizes=(num_q_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        if IS_PARTIAL_ROPE:
-            orig_qk = tl.extract_slice(
-                data,
-                offsets=(0, 0),
-                sizes=(num_q_heads, rope_dim),
-                strides=(1, 1),
-            )
-        else:
-            orig_qk = data
-        roped = cat_x * sin_tensor + orig_qk * cos_tensor
 
-        if IS_PARTIAL_ROPE:
-            data = tl.insert_slice(
-                data,
-                roped,
-                offsets=(0, 0),
-                sizes=(num_q_heads, rope_dim),
-                strides=(1, 1),
-            ).to(tl.bfloat16)
-        else:
-            data = roped.to(tl.bfloat16)
-
-        tl.store(out_q_ptr + token_idx * q_size + tl.arange(0, q_size), data.reshape(q_size))
-
-        # --- K: load -> rmsnorm -> rope -> store ---
         data = tl.load(qkv_base + q_size + tl.arange(0, kv_size)).to(tl.float32).reshape(num_kv_heads, head_size)
-
-        squares = data * data
-        variances = tl.sum(squares, axis=1) / head_size
-        reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(num_kv_heads, 1)
-        data = data * reciprocal_std
-        data = data * k_rmsnorm_weight
-        if has_bias:
-            data = data + k_bias
-
-        y1 = tl.extract_slice(
-            data,
-            offsets=(0, 0),
-            sizes=(num_kv_heads, half_rope_dim),
-            strides=(1, 1),
+        _rmsnorm_rope_store(
+            data, k_rmsnorm_weight, k_bias, cos_tensor, sin_tensor,
+            out_k_ptr, token_idx * kv_size,
+            num_kv_heads, head_size, kv_size, eps, half_rope_dim, rope_dim,
+            has_bias, IS_PARTIAL_ROPE,
         )
-        y2 = tl.extract_slice(
-            data,
-            offsets=(0, half_rope_dim),
-            sizes=(num_kv_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        cat_y = tl.zeros((num_kv_heads, rope_dim), dtype=tl.float32)
-        cat_y = tl.insert_slice(
-            cat_y,
-            -y2,
-            offsets=(0, 0),
-            sizes=(num_kv_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        cat_y = tl.insert_slice(
-            cat_y,
-            y1,
-            offsets=(0, half_rope_dim),
-            sizes=(num_kv_heads, half_rope_dim),
-            strides=(1, 1),
-        )
-        if IS_PARTIAL_ROPE:
-            orig_qk = tl.extract_slice(
-                data,
-                offsets=(0, 0),
-                sizes=(num_kv_heads, rope_dim),
-                strides=(1, 1),
-            )
-        else:
-            orig_qk = data
-        roped = cat_y * sin_tensor + orig_qk * cos_tensor
-
-        if IS_PARTIAL_ROPE:
-            data = tl.insert_slice(
-                data,
-                roped,
-                offsets=(0, 0),
-                sizes=(num_kv_heads, rope_dim),
-                strides=(1, 1),
-            ).to(tl.bfloat16)
-        else:
-            data = roped.to(tl.bfloat16)
-
-        tl.store(out_k_ptr + token_idx * kv_size + tl.arange(0, kv_size), data.reshape(kv_size))
 
 
 def triton_split_qkv_rmsnorm_mrope(
