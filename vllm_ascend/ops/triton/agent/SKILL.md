@@ -37,6 +37,7 @@ description: 指导 Triton Ascend 算子在昇腾 NPU 上的开发与性能优�
 ### 数据搬运
 - 保证 load 多行连续数据，不能 load 多行离散数据（离散数据需逐行 load）。
 - 传给 triton 算子的 tensor 必须连续，必要时用 `.contiguous()` 处理。
+- tl.load 和 tl.store 的变量名尽可能不要复用，使用不同的变量名以提高可读性并避免潜在的数据流错误。
 
 ### 性能相关
 - 减少 kernel 内 scalar 运算：与 pid 和循环变量无关的提到辅助函数，与循环变量无关的提到循环外，能合并则合并。
