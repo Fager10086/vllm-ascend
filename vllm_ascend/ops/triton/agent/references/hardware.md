@@ -147,7 +147,6 @@ def add_kernel(x_ptr,
         ```
         S_token_add = Σ(load_tensor_x × bytes_per_element_x + load_tensor_y × bytes_per_element_y + intermediate_tensor_output ×        bytes_per_element_output)
                     = BLOCK_SIZE × x.dtype + BLOCK_SIZE × y.dtype + BLOCK_SIZE × output.dtype
-
         ```
     - store 阶段：循环体内仅`output`占用 UB ，`x`和`y`计算完`output`后不再参与计算，store 阶段的 UB 占用峰值为`output`大小：
         ```
