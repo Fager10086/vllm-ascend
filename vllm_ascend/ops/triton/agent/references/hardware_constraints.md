@@ -64,18 +64,18 @@ Global Memory (GM) → [tl.load] → UB → [Vector 计算] → UB → [tl.store
 
 ### 3.2 容量
 
-| 芯片型号 | UB 容量 | 可用上限 (Double Buffer) | 建议使用量 |
+| 芯片型号 | UB 容量 | 可用上限 (Double Buffering) | 建议使用量 |
 |---------|---------|------------------------|-----------|
 | 910B | 192 KB | 96 KB | ~85 KB |
 
-### 3.3 Double Buffer 机制
+### 3.3 Double Buffering 机制
 
 **原理**：将 UB 分为两个 Buffer（A 和 B）：
 - 当 Vector 在 Buffer A 中计算时，MTE 同时将下一批数据搬入 Buffer B
 - 当 Vector 切换到 Buffer B 计算时，MTE 将 Buffer A 的结果搬出并加载新数据
 - 如此交替，实现 MTE 与 Vector 的流水并行
 
-**约束**：单次循环的 UB 占用必须 ≤ 总容量的一半，否则 Double Buffer 无法工作。
+**硬性约束**：单次循环的 UB 占用必须 ≤ 总容量的一半，否则 Double Buffering 无法工作。
 
 ```
 单次循环 UB 占用 ≤ 192 KB // 2 = 96 KB
@@ -98,7 +98,7 @@ Global Memory (GM) → [tl.load] → UB → [Vector 计算] → UB → [tl.store
 - 二维 tensor 形状如 `(num_heads, head_size)` 需按完整形状计算
 
 **计算公式**：
-假设一个算子包含 load、compute 和 store 三个操作过程，`S_token_load`、`S_token_compute`、`S_token_store`分别表示 load、 compute、 store三个阶段中的UB峰值占用大小，S_static 表示静态UB占用（例如：kernel 在循环体外加载到UB的权重），则这个 kernel UB 同时占用的峰值和单次循环最大可处理 token 数为：
+假设一个算子包含 load、compute 和 store 三个操作过程，`S_token_load`、`S_token_compute`、`S_token_store` 分别表示 load、 compute、 store 三个阶段中的 UB 峰值占用大小，S_static 表示静态 UB 占用（例如：kernel 在循环体外加载到 UB 的权重），则这个 kernel UB 同时占用的峰值和单次循环最大可处理 token 数为：
 ```
 S_token = max(S_token_load, S_token_compute, S_token_store) + S_static
         =   Σ(load_tensor_i × bytes_per_element_i)
@@ -108,7 +108,7 @@ S_token = max(S_token_load, S_token_compute, S_token_store) + S_static
 
 N = 85 * 1024 // S_token  （使用整数除法）
 ```
-S_static 较小时，可以利用我们预留的UB临时变量空间所消耗，不需要将其计入 S_token，当出现 UB 溢出时，可排查是否由 S_static 过大导致，如果是，则将其计入 S_token
+S_static 较小时，可以利用预留的 UB 临时变量空间所消耗，不需要将其计入 S_token，当出现 UB 溢出时，可排查是否由 S_static 过大导致，如果是，则将其计入 S_token。
 
 **计算公式示例**：
 以 add_kernel 为例：
@@ -136,7 +136,7 @@ def add_kernel(x_ptr,
 
         tl.store(output_ptr + offsets, output, mask=mask)
 ```
-- 该 Kernel 循环体外 NUM_CORE 和 NUM_BLOCKS 的 UB 占用较少，因此不在 S_token 中单独计算 S_static。
+- 该 kernel 循环体外 NUM_CORE 和 NUM_BLOCKS 的 UB 占用较少，因此不在 S_token 中单独计算 S_static。
 - 循环体内每次循环处理一个 BLOCK，处理过程可拆分为 load、add 和 store 三个阶段，
     - load 阶段：加载 `x` 和 `y` 用于`outout`的计算，load 阶段的 UB 占用峰值为 `x` 和 `y` 的占用之和：
         ```
@@ -184,7 +184,7 @@ MTE:            [store1][store2]...
 
 | 操作 | 影响 | 替代方案 |
 |------|------|---------|
-| `tl.load` with mask | MTE 等待 Vector 生成 mask | mask预计算 |
+| `tl.load` with mask | MTE 等待 Vector 生成 mask | mask 预计算 |
 | `tl.load` with other | 内部调用 tl.where，阻止 load 并行 | 去掉 other，手动 tl.where |
 | 大量 Scalar 计算 | Scalar 流水成为瓶颈 | 预计算、tl.arange 索引 |
 | range() 循环 | 可能影响流水并行 | 确保循环体内 load/vector 可并行 |
