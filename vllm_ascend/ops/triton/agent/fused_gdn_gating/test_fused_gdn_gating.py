@@ -10,7 +10,7 @@ BTACH = [1, 7168, 64*4096, 10]
 NUM_V_HEADS = [8, 32, 128, 16]
 SEEDS = [0]
 DEVICES = [f"npu:{0}"]
-DTYPES = [torch.bfloat16]
+DTYPES = [torch.bfloat16, torch.float32]
 DEFAULT_ATOL = 5e-2
 DEFAULT_RTOL = 5e-3
 
@@ -103,6 +103,6 @@ if __name__ == "__main__":
         num_heads=16,
         batch=10,
         seed=0,
-        dtype=torch.bfloat16,
+        dtype=torch.float32,
         device=f"npu:{0}",
     )
