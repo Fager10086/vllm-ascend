@@ -101,7 +101,7 @@ def test_fused_gdn_gating(batch, seed, num_heads, dtype, device):
 if __name__ == "__main__":
     test_fused_gdn_gating(
         num_heads=16,
-        batch=10,
+        batch=7168,
         seed=0,
         dtype=torch.float32,
         device=f"npu:{0}",
