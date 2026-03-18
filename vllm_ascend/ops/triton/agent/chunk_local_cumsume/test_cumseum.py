@@ -13,7 +13,7 @@ Note: head_first=True is excluded because the operator kernel has known
 issues on this platform (boundary_check on wrong dimension + incorrect
 backward transpose), making deterministic reference comparison infeasible.
 """
-
+import gc
 import sys
 import traceback
 
@@ -26,12 +26,13 @@ DEVICE = "npu"
 
 
 def torch_reference_cumsum(g, chunk_size, reverse=False, scale=None,
-                           cu_seqlens=None, head_first=False):
+                           cu_seqlens=None, head_first=False, dtype=None):
     """Pure PyTorch chunk-wise cumsum reference.
 
     Computes in float32, casts to input dtype to match kernel store
     precision, then returns as float32 for comparison.
     """
+
     input_dtype = g.dtype
     g_cpu = g.detach().cpu().float()
     B, T, H = g_cpu.shape
@@ -70,7 +71,7 @@ def torch_reference_cumsum(g, chunk_size, reverse=False, scale=None,
                     cv = cv * scale
                 result[b, cs:ce, :] = cv.to(input_dtype).float()
 
-    return result
+    return result.to(dtype)
 
 
 def check_close(output, expected, rtol=1e-3, atol=1e-3):
@@ -303,5 +304,27 @@ def main():
     sys.exit(0 if failed == 0 else 1)
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
+
+def test_chunk_local_cumsum_basic(B, T, H, chunk_size, head_first, reverse, dtype):
+    """Test basic cumsum without scale and cu_seqlens."""
+    torch.manual_seed(0)
+    assert T % chunk_size == 0
+        
+    B, T, H, cs = 1, 1024, 16, 64
+    g = torch.randn(B, T, H, dtype=torch.bfloat16, device=DEVICE)
+    # print(g)
+    output = chunk_local_cumsum(g=g, chunk_size=cs, reverse=reverse,
+                                scale=1, head_first=False,
+                                output_dtype=dtype)
+    expected = torch_reference_cumsum(g, cs, reverse=reverse, scale=1, dtype=dtype)
+
+    assert torch.allclose(output.cpu(), expected.cpu(), rtol=1e-3, atol=1e-3), \
+        f"Max diff: {(output.cpu() - expected.cpu()).abs().max()}"
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+if __name__ == '__main__':
+    test_chunk_local_cumsum_basic(1, 1024, 16, 64, head_first=False, reverse=False, dtype=torch.bfloat16)
