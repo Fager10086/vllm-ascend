@@ -304,27 +304,27 @@ def main():
     sys.exit(0 if failed == 0 else 1)
 
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()
 
-def test_chunk_local_cumsum_basic(B, T, H, chunk_size, head_first, reverse, dtype):
-    """Test basic cumsum without scale and cu_seqlens."""
-    torch.manual_seed(0)
-    assert T % chunk_size == 0
+# def test_chunk_local_cumsum_basic(B, T, H, chunk_size, head_first, reverse, dtype):
+#     """Test basic cumsum without scale and cu_seqlens."""
+#     torch.manual_seed(0)
+#     assert T % chunk_size == 0
         
-    B, T, H, cs = 1, 1024, 16, 64
-    g = torch.randn(B, T, H, dtype=torch.bfloat16, device=DEVICE)
-    # print(g)
-    output = chunk_local_cumsum(g=g, chunk_size=cs, reverse=reverse,
-                                scale=1, head_first=False,
-                                output_dtype=dtype)
-    expected = torch_reference_cumsum(g, cs, reverse=reverse, scale=1, dtype=dtype)
+#     B, T, H, cs = 1, 1024, 16, 64
+#     g = torch.randn(B, T, H, dtype=torch.bfloat16, device=DEVICE)
+#     # print(g)
+#     output = chunk_local_cumsum(g=g, chunk_size=cs, reverse=reverse,
+#                                 scale=1, head_first=False,
+#                                 output_dtype=dtype)
+#     expected = torch_reference_cumsum(g, cs, reverse=reverse, scale=1, dtype=dtype)
 
-    assert torch.allclose(output.cpu(), expected.cpu(), rtol=1e-3, atol=1e-3), \
-        f"Max diff: {(output.cpu() - expected.cpu()).abs().max()}"
-    gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
+#     assert torch.allclose(output.cpu(), expected.cpu(), rtol=1e-3, atol=1e-3), \
+#         f"Max diff: {(output.cpu() - expected.cpu()).abs().max()}"
+#     gc.collect()
+#     torch.npu.empty_cache()
+#     torch.npu.reset_peak_memory_stats()
 
-if __name__ == '__main__':
-    test_chunk_local_cumsum_basic(1, 1024, 16, 64, head_first=False, reverse=False, dtype=torch.bfloat16)
+# if __name__ == '__main__':
+#     test_chunk_local_cumsum_basic(1, 1024, 16, 64, head_first=False, reverse=False, dtype=torch.bfloat16)
