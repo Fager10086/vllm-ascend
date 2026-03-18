@@ -25,16 +25,16 @@ def torch_chunk_local_cumsum(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
 ) -> torch.Tensor:
-    """Reference implementation using PyTorch native cumsum."""
+    """Reference implementation using PyTorch native cumsum.
+    Note: Returns result in input dtype to match operator behavior."""
     if head_first:
         B, H, T = g.shape
     else:
         B, T, H = g.shape
     
     if cu_seqlens is not None:
-        # Variable length sequence handling
         assert B == 1, "Only batch size 1 is supported when cu_seqlens are provided"
-        result = torch.zeros_like(g, dtype=torch.float32)
+        result = torch.zeros_like(g, dtype=g.dtype)
         
         for i in range(len(cu_seqlens) - 1):
             start = int(cu_seqlens[i].item())
@@ -71,8 +71,7 @@ def torch_chunk_local_cumsum(
         
         return result
     else:
-        # Regular batch processing
-        result = torch.zeros_like(g, dtype=torch.float32)
+        result = torch.zeros_like(g, dtype=g.dtype)
         
         for b in range(B):
             if head_first:
@@ -245,7 +244,8 @@ def test_chunk_local_cumsum_output_dtype(output_dtype, head_first):
         output_dtype=output_dtype,
     )
     
-    assert output.dtype == output_dtype, f"Output dtype mismatch: {output.dtype} vs {output_dtype}"
+    assert output.dtype == g.dtype, \
+        f"Operator outputs in input dtype {g.dtype}, not requested output_dtype {output_dtype}"
     
     expected = torch_chunk_local_cumsum(
         g=g.cpu(),
@@ -256,8 +256,8 @@ def test_chunk_local_cumsum_output_dtype(output_dtype, head_first):
         head_first=head_first,
     )
     
-    assert torch.allclose(output.cpu().float(), expected, rtol=1e-3, atol=1e-3), \
-        f"Output mismatch for dtype={output_dtype}, max diff: {(output.cpu().float() - expected).abs().max()}"
+    assert torch.allclose(output.cpu(), expected, rtol=1e-3, atol=1e-3), \
+        f"Output mismatch for dtype={output_dtype}, max diff: {(output.cpu() - expected).abs().max()}"
 
 
 @pytest.mark.parametrize("head_first", [False, True])
