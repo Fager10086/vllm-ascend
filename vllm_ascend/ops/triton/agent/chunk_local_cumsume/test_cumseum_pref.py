@@ -1,330 +1,279 @@
-#!/usr/bin/env python3
+# Copyright © 2025 Huawei Technologies Co., Ltd.
+# Based on vLLM: https://github.com/vllm-project/vllm
+# Based on flash-linear-attention: https://github.com/fla-org/flash-linear-attention
+#
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
+#
+# This file contains code copied from the flash-linear-attention project.
+# The original source code was licensed under the MIT license and included
+# the following copyright notice:
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# ruff: noqa: E501
 
-"""Precision unit tests for chunk_local_cumsum operator.
-
-Execute: python tests/ut/ops/test_cumsum.py
-
-Tests cover head_first=False path with all parameter combinations:
-B, T, H, chunk_size, reverse, scale, cu_seqlens, dtype, output_dtype.
-
-Note: head_first=True is excluded because the operator kernel has known
-issues on this platform (boundary_check on wrong dimension + incorrect
-backward transpose), making deterministic reference comparison infeasible.
-"""
-import gc
-import sys
-import traceback
+import os
+from typing import Optional
 
 import pytest
 import torch
+import torch.nn.functional as F
+from einops import rearrange, repeat
 
-from vllm_ascend.ops.triton.fla.cumsum import chunk_local_cumsum
+from utils import Benchmark, OpType
+from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_fwd
 
-DEVICE = "npu"
+device = "npu"
 
 
-def torch_reference_cumsum(g, chunk_size, reverse=False, scale=None,
-                           cu_seqlens=None, head_first=False, dtype=None):
-    """Pure PyTorch chunk-wise cumsum reference.
+def get_abs_err(x, y):
+    return (x.detach() - y.detach()).flatten().abs().max().item()
 
-    Computes in float32, casts to input dtype to match kernel store
-    precision, then returns as float32 for comparison.
-    """
 
-    input_dtype = g.dtype
-    g_cpu = g.detach().cpu().float()
-    B, T, H = g_cpu.shape
-    result = torch.zeros_like(g_cpu)
+def get_err_ratio(x, y):
+    err = (x.detach() - y.detach()).flatten().square().mean().sqrt().item()
+    base = (x.detach()).flatten().square().mean().sqrt().item()
+    return err / (base + 1e-8)
 
-    def _do_cumsum(data, dim):
-        if reverse:
-            return torch.flip(
-                torch.cumsum(torch.flip(data, [dim]), dim=dim), [dim])
-        return torch.cumsum(data, dim=dim)
 
-    if cu_seqlens is not None:
-        cu = cu_seqlens.detach().cpu()
-        for i in range(len(cu) - 1):
-            s = int(cu[i].item())
-            e = int(cu[i + 1].item())
-            seq_len = e - s
-            n_chunks = (seq_len + chunk_size - 1) // chunk_size
-            for ci in range(n_chunks):
-                cs = ci * chunk_size
-                ce = min(cs + chunk_size, seq_len)
-                chunk = g_cpu[0, s + cs:s + ce, :].clone()
-                cv = _do_cumsum(chunk, dim=0)
-                if scale is not None:
-                    cv = cv * scale
-                result[0, s + cs:s + ce, :] = cv.to(input_dtype).float()
+def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
+    abs_atol = get_abs_err(ref, tri)
+    msg = f"{prefix:>16} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
+    error_rate = get_err_ratio(ref, tri)
+    if abs_atol <= err_atol:
+        return
     else:
-        for b in range(B):
-            n_chunks = (T + chunk_size - 1) // chunk_size
-            for ci in range(n_chunks):
-                cs = ci * chunk_size
-                ce = min(cs + chunk_size, T)
-                chunk = g_cpu[b, cs:ce, :].clone()
-                cv = _do_cumsum(chunk, dim=0)
-                if scale is not None:
-                    cv = cv * scale
-                result[b, cs:ce, :] = cv.to(input_dtype).float()
-
-    return result.to(dtype)
+        assert error_rate < ratio, msg
 
 
-def check_close(output, expected, rtol=1e-3, atol=1e-3):
-    out_f = output.detach().cpu().float()
-    exp_f = expected.float()
-    max_diff = (out_f - exp_f).abs().max().item()
-    assert out_f.shape == exp_f.shape, \
-        f"Shape mismatch: {out_f.shape} vs {exp_f.shape}"
-    assert torch.allclose(out_f, exp_f, rtol=rtol, atol=atol), \
-        f"Max diff: {max_diff}"
+def print_diff(name, ref, tri, atol=0.005):
+    abs_diff = torch.abs(ref - tri)
+    max_abs_diff = abs_diff.max().item()
+    print(f"[{name}] Max absolute difference: {max_abs_diff:.6f}")
+    if max_abs_diff > atol:
+        print(f"Exceeds tolerance ({atol})!")
 
 
-# ---- Parametrized tests (pytest) ----
+def recurrent_gated_delta_rule_ref(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    g: torch.Tensor,
+    scale: float = None,
+    initial_state: torch.Tensor = None,
+    output_final_state: bool = False,
+):
+    q, k, v, beta, g = map(
+        lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g]
+    )
+    B, H, T, K, V = *k.shape, v.shape[-1]
+    o = torch.zeros(B, H, T, V).to(v)
+    h = torch.zeros(B, H, K, V).to(v)
+    if initial_state is not None:
+        h = initial_state
+    if scale is None:
+        scale = 1 / (q.shape[-1] ** 0.5)
+    q = q * scale
+    for i in range(T):
+        b_q = q[:, :, i]
+        b_k = k[:, :, i]
+        b_v = v[:, :, i].clone()
+        h = h.clone() * g[:, :, i].exp()[..., None, None]
+        b_beta = beta[:, :, i]
+        b_v = b_v - (h.clone() * b_k[..., None]).sum(-2)
+        b_v = b_v * b_beta[..., None]
+        h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2)
+        o[:, :, i] = torch.einsum("bhd,bhdm->bhm", b_q, h)
+    if not output_final_state:
+        h = None
+    o = o.transpose(1, 2).contiguous()
+    return o, h
 
-@pytest.mark.parametrize("B", [1, 2])
-@pytest.mark.parametrize("T", [64, 128, 256])
-@pytest.mark.parametrize("H", [16, 32])
-@pytest.mark.parametrize("chunk_size", [16, 32, 64])
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
-def test_chunk_local_cumsum_basic(B, T, H, chunk_size, reverse, dtype):
+
+def chunk_gated_delta_rule_ref(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int = 64,
+    scale: float = None,
+    initial_state: torch.Tensor = None,
+    output_final_state: bool = False,
+):
+    BT = chunk_size
+    if scale is None:
+        scale = 1 / (q.shape[-1] ** 0.5)
+    # Calculate padding needed to make T a multiple of BT
+    q, k, v, beta, g = map(
+        lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g]
+    )
+
+    T = q.shape[-2]
+    pad_len = (BT - (T % BT)) % BT
+    if pad_len > 0:
+        # Pad all tensors
+        q = F.pad(q, (0, 0, 0, pad_len))
+        k = F.pad(k, (0, 0, 0, pad_len))
+        v = F.pad(v, (0, 0, 0, pad_len))
+        beta = F.pad(beta, (0, pad_len))
+        g = F.pad(g, (0, pad_len))
+    q, k, v, beta, g = map(lambda x: x.to(torch.float32), [q, k, v, beta, g])
+    decay = g
+    chunk_size = BT
+    b, h, l, d_k = q.shape
+    d_v = v.shape[-1]
+    q = q * scale
+    v = v * beta[..., None]
+    k_beta = k * beta[..., None]
+    assert l % chunk_size == 0
+    # note that diagonal is masked.
+    mask = torch.triu(
+        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device),
+        diagonal=0,
+    )
+    q, k, v, k_beta, decay = map(
+        lambda x: rearrange(x, "b h (n c) d -> b h n c d", c=chunk_size),
+        [q, k, v, k_beta, decay.unsqueeze(-1)],
+    )
+    decay = decay.squeeze(-1).cumsum(-1)
+    decay_exp = decay.exp()[..., None]
+    L_mask = ((decay.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
+    attn = -((k_beta @ k.transpose(-1, -2)) * L_mask).masked_fill(mask, 0)
+    for i in range(1, chunk_size):
+        attn[..., i, :i] = attn[..., i, :i].clone() + (
+            attn[..., i, :i, None].clone() * attn[..., :i, :i].clone()
+        ).sum(-2)
+    attn = attn + torch.eye(chunk_size, dtype=torch.float, device=q.device)
+    attn = attn
+    k_cumsum = attn @ v
+    k_cumdecay = attn @ (k_beta * decay_exp)
+    v = k_cumsum
+    S = k.new_zeros(b, h, d_k, d_v)
+    if initial_state is not None:
+        S = initial_state
+    o = torch.zeros_like(v)
+    mask = torch.triu(
+        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device),
+        diagonal=1,
+    )
+    for i in range(0, l // chunk_size):
+        q_i, k_i, v_i = q[:, :, i], k[:, :, i], v[:, :, i]
+        attn = (q_i @ k_i.transpose(-1, -2) * L_mask[:, :, i]).masked_fill_(mask, 0)
+        v_prime = (k_cumdecay[:, :, i]) @ S
+        v_new = v_i - v_prime
+        o_inter = (q_i * decay[:, :, i, :, None].exp()) @ S
+        o[:, :, i] = o_inter + attn @ v_new
+        S = (
+            S * decay[:, :, i, -1, None, None].exp()
+            + (
+                k_i * (decay[:, :, i, -1, None] - decay[:, :, i]).exp()[..., None]
+            ).transpose(-1, -2)
+            @ v_new
+        )
+    if not output_final_state:
+        S = None
+    # unpad
+    o = rearrange(o, "b h n c d -> b h (n c) d")
+    o = o[:, :, :T]
+    o = o.transpose(1, 2)
+    return o, S
+
+
+@pytest.mark.parametrize(
+    ("H", "D", "mask_p", "cu_seqlens", "dtype"),
+    [
+        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (8, 128, 0, [0, 6], torch.float16),
+            (8, 128, 0, [0, 15], torch.float16),
+            (8, 128, 0, [0, 24], torch.float16),
+            (8, 128, 0, [0, 31], torch.float16),
+            (8, 128, 0, [0, 32], torch.float16),
+            (8, 128, 0, [0, 33], torch.float16),
+            (8, 128, 0, [0, 48], torch.float16),
+            (8, 128, 0, [0, 63], torch.float16),
+            (8, 128, 0, [0, 64], torch.float16),
+            (8, 128, 0, [0, 64], torch.float16),
+            (8, 128, 0, [0, 76], torch.float16),
+            (8, 128, 0, [0, 84], torch.float16),
+            (8, 128, 0, [0, 96], torch.float16),
+            (8, 128, 0, [0, 100], torch.float16),
+            (8, 128, 0, [0, 115], torch.float16),
+            (8, 128, 0, [0, 127], torch.float16),
+            (8, 128, 0, [0, 128], torch.float16),
+        ]
+    ],
+)
+@pytest.mark.xdist_group("benchmark")
+def test_benchmark_chunk_varlen(
+    H: int,
+    D: int,
+    mask_p: float,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+):
+    if D != 128:
+        pytest.skip(
+            reason="chunk_gated_delta_rule is not supported on alchemist for D!=128"
+        )
     torch.manual_seed(42)
-    g = torch.randn(B, T, H, dtype=dtype, device=DEVICE)
-    output = chunk_local_cumsum(g=g, chunk_size=chunk_size, reverse=reverse,
-                                head_first=False, output_dtype=None)
-    expected = torch_reference_cumsum(g, chunk_size, reverse=reverse)
-    check_close(output, expected)
+    os.environ["TRITON_F32_DEFAULT"] = "ieee"
+    # randomly split the sequence into N segments
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
 
+    # seq-first required for inputs with variable lengths
+    q = torch.randn((1, T, H, D), dtype=dtype)
+    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn((1, T, H, D), dtype=dtype)
+    g = F.logsigmoid(torch.rand(1, T, H, dtype=torch.float32))
+    g = g * (torch.rand_like(g) > mask_p)
+    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
+    h0 = torch.randn((N, H, D, D), dtype=dtype)
 
-@pytest.mark.parametrize("B", [1, 2])
-@pytest.mark.parametrize("T", [64, 128])
-@pytest.mark.parametrize("H", [16, 32])
-@pytest.mark.parametrize("chunk_size", [16, 32])
-@pytest.mark.parametrize("scale", [0.5, 1.0, 2.0])
-def test_chunk_local_cumsum_with_scale(B, T, H, chunk_size, scale):
-    torch.manual_seed(42)
-    g = torch.randn(B, T, H, dtype=torch.float16, device=DEVICE)
-    output = chunk_local_cumsum(g=g, chunk_size=chunk_size, scale=scale,
-                                head_first=False, output_dtype=None)
-    expected = torch_reference_cumsum(g, chunk_size, scale=scale)
-    check_close(output, expected)
+    q, k, v, beta, g, h0 = map(
+        lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0)
+    )
 
+    # triton
+    def triton_op():
+        _, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
+            q=q.clone(),
+            k=k.clone(),
+            v=v.clone(),
+            beta=beta.clone(),
+            g=g.clone(),
+            scale=None,
+            initial_state=h0.clone(),
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+        )
 
-@pytest.mark.parametrize("seq_lens", [[32, 64, 48], [64, 128], [100]])
-@pytest.mark.parametrize("H", [16, 32])
-@pytest.mark.parametrize("chunk_size", [16, 32])
-def test_chunk_local_cumsum_varlen(seq_lens, H, chunk_size):
-    torch.manual_seed(42)
-    offsets = [0]
-    for s in seq_lens:
-        offsets.append(offsets[-1] + s)
-    cu_seqlens = torch.tensor(offsets, dtype=torch.long, device=DEVICE)
-    total = offsets[-1]
-    g = torch.randn(1, total, H, dtype=torch.float16, device=DEVICE)
-    output = chunk_local_cumsum(g=g, chunk_size=chunk_size,
-                                cu_seqlens=cu_seqlens,
-                                head_first=False, output_dtype=None)
-    expected = torch_reference_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
-    check_close(output, expected)
+    # torch
+    def torch_op():
+        ref = []
+        ref_ht = []
+        for i in range(N):
+            ref_i, ref_ht_i = recurrent_gated_delta_rule_ref(
+                q=q[:, cu_seqlens[i] : cu_seqlens[i + 1]],
+                k=k[:, cu_seqlens[i] : cu_seqlens[i + 1]],
+                v=v[:, cu_seqlens[i] : cu_seqlens[i + 1]],
+                beta=beta[:, cu_seqlens[i] : cu_seqlens[i + 1]],
+                g=g[:, cu_seqlens[i] : cu_seqlens[i + 1]],
+                initial_state=h0[i],
+                output_final_state=True,
+            )
+            ref.append(ref_i)
+            ref_ht.append(ref_ht_i)
+        ref = torch.cat(ref, 1)
+        ref_ht = torch.cat(ref_ht, 0)
 
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
-def test_chunk_local_cumsum_output_dtype(dtype):
-    torch.manual_seed(42)
-    B, T, H, cs = 2, 128, 16, 32
-    g = torch.randn(B, T, H, dtype=dtype, device=DEVICE)
-    output = chunk_local_cumsum(g=g, chunk_size=cs, head_first=False,
-                                output_dtype=dtype)
-    assert output.dtype == dtype
-    expected = torch_reference_cumsum(g, cs)
-    check_close(output, expected)
-
-
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("scale", [0.5, 2.0])
-def test_chunk_local_cumsum_scale_and_reverse(reverse, scale):
-    torch.manual_seed(42)
-    B, T, H, cs = 2, 128, 16, 32
-    g = torch.randn(B, T, H, dtype=torch.float16, device=DEVICE)
-    output = chunk_local_cumsum(g=g, chunk_size=cs, reverse=reverse,
-                                scale=scale, head_first=False,
-                                output_dtype=None)
-    expected = torch_reference_cumsum(g, cs, reverse=reverse, scale=scale)
-    check_close(output, expected)
-
-
-@pytest.mark.parametrize("seq_lens", [[32, 64], [64, 128]])
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("scale", [None, 0.5])
-def test_chunk_local_cumsum_varlen_combined(seq_lens, reverse, scale):
-    torch.manual_seed(42)
-    H, cs = 16, 32
-    offsets = [0]
-    for s in seq_lens:
-        offsets.append(offsets[-1] + s)
-    cu_seqlens = torch.tensor(offsets, dtype=torch.long, device=DEVICE)
-    total = offsets[-1]
-    g = torch.randn(1, total, H, dtype=torch.float16, device=DEVICE)
-    output = chunk_local_cumsum(g=g, chunk_size=cs, reverse=reverse,
-                                scale=scale, cu_seqlens=cu_seqlens,
-                                head_first=False, output_dtype=None)
-    expected = torch_reference_cumsum(g, cs, reverse=reverse, scale=scale,
-                                      cu_seqlens=cu_seqlens)
-    check_close(output, expected)
-
-
-def test_chunk_local_cumsum_T_equals_chunk_size():
-    torch.manual_seed(42)
-    g = torch.randn(2, 64, 16, dtype=torch.float32, device=DEVICE)
-    output = chunk_local_cumsum(g=g, chunk_size=64, head_first=False,
-                                output_dtype=None)
-    expected = torch_reference_cumsum(g, 64)
-    check_close(output, expected)
-
-
-def test_chunk_local_cumsum_T_multiple_of_chunk_size():
-    torch.manual_seed(42)
-    g = torch.randn(1, 256, 32, dtype=torch.float32, device=DEVICE)
-    output = chunk_local_cumsum(g=g, chunk_size=64, head_first=False,
-                                output_dtype=None)
-    expected = torch_reference_cumsum(g, 64)
-    check_close(output, expected)
-
-
-def test_chunk_local_cumsum_invalid_chunk_size():
-    g = torch.randn(1, 64, 16, dtype=torch.float32, device=DEVICE)
-    try:
-        chunk_local_cumsum(g=g, chunk_size=15)
-        raise RuntimeError("Should have raised AssertionError")
-    except AssertionError:
-        pass
-
-
-def test_chunk_local_cumsum_invalid_shape():
-    g = torch.randn(1, 64, dtype=torch.float32, device=DEVICE)
-    try:
-        chunk_local_cumsum(g=g, chunk_size=16)
-        raise RuntimeError("Should have raised ValueError")
-    except ValueError:
-        pass
-
-
-# ---- Direct execution runner ----
-
-def _run_one(name, fn, *args, **kwargs):
-    try:
-        fn(*args, **kwargs)
-        return True
-    except Exception:
-        print(f"  FAIL  {name}")
-        traceback.print_exc()
-        return False
-
-
-def main():
-    passed = 0
-    failed = 0
-
-    def run(name, fn, *a, **kw):
-        nonlocal passed, failed
-        if _run_one(name, fn, *a, **kw):
-            passed += 1
-        else:
-            failed += 1
-
-    # 1. Basic tests
-    print("=== Basic cumsum tests ===")
-    for B in [1, 2]:
-        for T in [64, 128, 256]:
-            for H in [16, 32]:
-                for cs in [16, 32, 64]:
-                    for rev in [False, True]:
-                        for dt in [torch.float16, torch.float32]:
-                            run(f"basic B={B} T={T} H={H} cs={cs} "
-                                f"rev={rev} dt={dt}",
-                                test_chunk_local_cumsum_basic,
-                                B, T, H, cs, rev, dt)
-
-    # 2. Scale tests
-    print("=== Scale tests ===")
-    for B in [1, 2]:
-        for T in [64, 128]:
-            for H in [16, 32]:
-                for cs in [16, 32]:
-                    for sc in [0.5, 1.0, 2.0]:
-                        run(f"scale B={B} T={T} H={H} cs={cs} sc={sc}",
-                            test_chunk_local_cumsum_with_scale,
-                            B, T, H, cs, sc)
-
-    # 3. Variable length tests
-    print("=== Varlen tests ===")
-    for sl in [[32, 64, 48], [64, 128], [100]]:
-        for H in [16, 32]:
-            for cs in [16, 32]:
-                run(f"varlen sl={sl} H={H} cs={cs}",
-                    test_chunk_local_cumsum_varlen, sl, H, cs)
-
-    # 4. Output dtype tests
-    print("=== Output dtype tests ===")
-    for dt in [torch.float16, torch.float32]:
-        run(f"output_dtype dt={dt}",
-            test_chunk_local_cumsum_output_dtype, dt)
-
-    # 5. Scale + reverse combined
-    print("=== Scale + reverse tests ===")
-    for rev in [False, True]:
-        for sc in [0.5, 2.0]:
-            run(f"scale_rev rev={rev} sc={sc}",
-                test_chunk_local_cumsum_scale_and_reverse, rev, sc)
-
-    # 6. Varlen combined
-    print("=== Varlen combined tests ===")
-    for sl in [[32, 64], [64, 128]]:
-        for rev in [False, True]:
-            for sc in [None, 0.5]:
-                run(f"varlen_comb sl={sl} rev={rev} sc={sc}",
-                    test_chunk_local_cumsum_varlen_combined, sl, rev, sc)
-
-    # 7. Edge cases
-    print("=== Edge case tests ===")
-    run("T_eq_cs", test_chunk_local_cumsum_T_equals_chunk_size)
-    run("T_mult_cs", test_chunk_local_cumsum_T_multiple_of_chunk_size)
-    run("invalid_chunk_size", test_chunk_local_cumsum_invalid_chunk_size)
-    run("invalid_shape", test_chunk_local_cumsum_invalid_shape)
-
-    total = passed + failed
-    print(f"\n{'=' * 60}")
-    print(f"Results: {passed}/{total} passed, {failed} failed")
-    print(f"{'=' * 60}")
-    sys.exit(0 if failed == 0 else 1)
-
-
-# if __name__ == "__main__":
-#     main()
-
-def test_chunk_local_cumsum_basic(B, T, H, chunk_size, head_first, reverse, dtype):
-    """Test basic cumsum without scale and cu_seqlens."""
-    torch.manual_seed(0)
-    assert T % chunk_size == 0
-        
-    B, T, H, cs = 1, 1024, 16, 64
-    g = torch.randn(B, T, H, dtype=torch.bfloat16, device=DEVICE)
-    # print(g)
-    output = chunk_local_cumsum(g=g, chunk_size=cs, reverse=reverse,
-                                scale=1, head_first=False,
-                                output_dtype=dtype)
-    expected = torch_reference_cumsum(g, cs, reverse=reverse, scale=1, dtype=dtype)
-
-    assert torch.allclose(output.cpu(), expected.cpu(), rtol=1e-3, atol=1e-3), \
-        f"Max diff: {(output.cpu() - expected.cpu()).abs().max()}"
-    gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
-
-if __name__ == '__main__':
-    test_chunk_local_cumsum_basic(1, 1024, 16, 64, head_first=False, reverse=False, dtype=torch.bfloat16)
+    benchmark = Benchmark(
+        triton_op=triton_op,
+        torch_op=torch_op,
+        op_type=OpType.CV,
+    )
+    benchmark.run()
