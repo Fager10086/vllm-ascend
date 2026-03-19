@@ -1,6 +1,6 @@
 ---
 name: vector-triton-ascend-ops-optimizer
-description: 昇腾（Ascend） NPU 上 Triton 算子深度性能优化技能（Skill），致力于实现用户要求的 Triton 算子性能提升。核心技术包括但不限于 Unified Buffer (UB) 容量规划、多 Tokens 并行处理、MTE/Vector 流水并行、mask（掩码）优化等。当用户提及以下内容时，务必触发此技能（Skill）：昇腾 NPU Triton 算子、Vector 类 Triton 算子性能优化。
+description: 昇腾（Ascend） NPU 上 Triton 算子深度性能优化技能（Skill），致力于实现用户要求的 Triton 算子性能提升。核心技术包括但不限于 Unified Buffer (UB) 容量规划、多 Tokens 并行处理、MTE/Vector 流水并行、mask（掩码）优化等。当用户提及以下内容时，务必触发此技能（Skill）：昇腾（Ascend）NPU 上 Vector 类 Triton 算子性能优化。
 ---
 
 # Vector 类 Triton 算子性能优化
@@ -23,10 +23,10 @@ description: 昇腾（Ascend） NPU 上 Triton 算子深度性能优化技能（
 
 0. 在昇腾 NPU 环境中，执行以下命令完成**环境配置**：`export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH && source /usr/local/Ascend/ascend-toolkit/set_env.sh`
 
-1. **基线性能验证**：首先，深入分析算子的输入参数、数据类型、Shape 范围、功能逻辑、计算流程及输出结果；然后，运行功能测试文件 `python -m pytest test_<op_name>.py`，验证算子的正确性和精度；最后，执行以下性能测试命令：`msprof op --output=<用户指定的路径> --kernel-name="<op_name>_kernel" --warm-up=20 --launch-count=20 python test_<op_name>_perf.py`，输出中的 Task Duration(us) 即为当前算子的耗时，将其记录为基线性能数据。
+1. **基线性能验证**：首先，深入分析算子的输入参数、数据类型、Shape 范围、功能逻辑、计算流程及输出结果；然后，运行功能测试文件，验证算子的正确性和精度；最后，执行性能测试命令，输出中的 Task Duration(us) 或 Triton(us) 即为当前算子的耗时，将其记录为基线性能数据。
 
 2. **深度性能优化**：根据基线分析结果，对 `<op_name>.py` 算子进行针对性优化，确保性能提升至少 **x 倍**（用户要求的性能提升），在满足要求的基础上，性能越高越好，追求极致性能。需运行以下测试：
-    - 性能测试（与基线对比）：`msprof op --output=<用户指定的路径> --kernel-name="<op_name>_kernel" --warm-up=20 --launch-count=20 python test_<op_name>_perf.py`
+    - 性能测试（与基线对比）
     - 正确性验证：`python -m pytest test_<op_name>.py`
 
 3. **迭代调优过程中按需参考的文档**：`references/hardware_constraints.md`、`references/troubleshooting.md`
@@ -40,7 +40,7 @@ description: 昇腾（Ascend） NPU 上 Triton 算子深度性能优化技能（
 - 为留安全余量，仅使用 170 KB 的 **50%**（为确保启用 Double Buffering），即 **85 KB**
 - 单个 Token 在 Kernel 内同时占用的 UB 空间峰值为 $S_{\text{token}}$（包含所有 load、中间变量的内存占用）
 
-则需满足：$N \times S_{\text{token}} \le 85 \times 1024$；因此：$N \le \left\lfloor \frac{85 \times 1024}{S_{\text{token}}} \right\rfloor$
+则需满足：$N \times S_{\text{token}} \le 85 \times 1024$；因此：$N \le \frac{85 \times 1024}{S_{\text{token}}}$
 **示例：** 若 Kernel 只做一次 load 和一次 store，加载形状为 `(batch_size, hidden_size)` 的 **BF16** Tensor（每元素 2 Bytes），且不引入其他中间变量，则单个 Token 的 UB 占用峰值为：
 $$
 S_{\text{token}} = \text{hidden\_size} \times 2
@@ -70,7 +70,7 @@ $$
 
 10 - 执行规约操作时，优先选择最大的维度进行规约，有助于提升性能。
 
-11 - kernel的入参中：对于同一模型调用过程中不变的参数，建议使用 `tl.constexpr` 声明为编译期常量，以便编译器进行更有效的优化；对于同一模型调用中可能变化的参数（如 batch_size、seq_len 等），则不应声明为 `tl.constexpr`，而是建议使用普通的动态参数传入，避免过多的 `tl.constexpr` 参数导致编译时间过长。
+11 - **kernel 入参**：对于同一模型调用期间保持不变的参数，推荐声明为 `tl.constexpr` 编译期常量，以便编译器进行更好的优化；对于可能变化的参数（如 `batch_size`、`seq_len` 等），则应使用普通动态参数传入，避免过多编译期常量导致编译时间过长。
 
 ## 需遵循的规则和约束
 
