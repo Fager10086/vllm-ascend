@@ -1,0 +1,4 @@
+优化目标算子为：vllm-ascend/vllm_ascend/ops/triton/fused_gdn_gating.py的solve_tril_16x16_kernel及solve_tril函数中关于solve_tril_16x16_kernel的grid切分逻辑
+精度与功能正确性验证用 `python -m pytest test_cumseum.py`；
+性能测试用 `python -m pytest test_cumseum_pref.py`
+utils放到测试脚本同级目录下
