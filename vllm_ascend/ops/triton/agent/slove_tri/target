@@ -1,4 +1,4 @@
 优化目标算子为：vllm-ascend/vllm_ascend/ops/triton/fla/solve_tril.py
 精度与功能正确性验证用 `python -m pytest test_solve_tri.py`；
-性能测试用 `python -m pytest test_solve_tri_pref.py`
+性能测试用 `python -m pytest -sv test_solve_tri_pref.py`
 utils放到测试脚本同级目录下
