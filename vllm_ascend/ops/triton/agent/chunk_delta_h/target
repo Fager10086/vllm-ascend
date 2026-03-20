@@ -1,3 +1,4 @@
-把该文件替换掉fla目录下的同名文件
+https://github.com/Fager10086/vllm-ascend/tree/main/vllm_ascend/ops/triton/fla用这里的fla代替环境上的fla（整个目录替换）
+然后把该文件替换掉fla目录下的同名文件
 直接python 该文件即可进行性能测试
-精度测试使用chunk_local_cumsum相同测试脚本
+精度测试使用chunk_local_cumsum相同测试脚本，chunk_local_cumsum目录下的utils要和精度测试脚本放在同一级木
