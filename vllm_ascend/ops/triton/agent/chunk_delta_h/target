@@ -1,0 +1,3 @@
+把该文件替换掉fla目录下的同名文件
+直接python 该文件即可进行性能测试
+精度测试使用chunk_local_cumsum相同测试脚本
