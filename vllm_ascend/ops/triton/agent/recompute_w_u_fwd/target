@@ -1,5 +1,6 @@
 建议用新一点的镜像：v0.17.0或者main
 把整个目录下载到本地 https://github.com/Fager10086/vllm-ascend/tree/qwen3_5_ops/vllm_ascend/ops/triton/fla，然后将这个fla代替原vllm-ascend目录下的fla
 目标文件：https://github.com/Fager10086/vllm-ascend/blob/qwen3_5_ops/vllm_ascend/ops/triton/fla/wy_fast.py
-精度测试：
-性能测试
+测试文件都在https://github.com/Fager10086/vllm-ascend/tree/ops_agent/vllm_ascend/ops/triton/agent/test_chunk目录下，把这个目录随便放
+精度测试： `python -m pytest test_cumseum.py`
+性能测试 `python -m pytest test_cumseum.py`
