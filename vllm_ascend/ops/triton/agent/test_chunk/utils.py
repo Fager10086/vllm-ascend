@@ -172,6 +172,6 @@ class Benchmark:
             raise ValueError(f"[Benckmark] unknown op type: {self.op_type}")
 
         print(
-            f"[Benckmark] Result: SpeedUp: {speedup:.6f}|Threshold: {threshold}|Torch: {torch_average}(us)|Triton: {triton_average}(us)"
+            f"Task Duration(us): {triton_average}"
         )
         assert speedup >= threshold, f"Performacne not meeting threshold!"
