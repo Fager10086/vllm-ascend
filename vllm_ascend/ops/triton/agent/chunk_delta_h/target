@@ -1,4 +1,4 @@
 https://github.com/Fager10086/vllm-ascend/tree/main/vllm_ascend/ops/triton/fla用这里的fla代替环境上的fla（整个目录替换）
 然后把该文件替换掉fla目录下的同名文件
 性能测试：msprof --application="python3 /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/chunk_delta_h.py" --output=./result
-精度测试pytest 
+精度测试 `python -m pytest test_cumseum.py`
