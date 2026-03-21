@@ -11,25 +11,10 @@
 # mypy: ignore-errors
 
 import torch
-import torch.nn.functional as F
 from vllm.triton_utils import tl, triton
 
-# from .utils import prepare_chunk_offsets, safe_exp
-def prepare_chunk_offsets(
-    cu_seqlens: torch.LongTensor, chunk_size: int
-) -> torch.LongTensor:
-    # print(prepare_lens(cu_seqlens),"*******************************")
-    return torch.cat(
-        [cu_seqlens.new_tensor([0]), triton.cdiv(torch.tensor([128]).to("npu"), chunk_size)]
-    ).cumsum(-1)
+from vllm_ascend.ops.triton.fla.utils import prepare_chunk_offsets, safe_exp
 
-def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
-    return torch.LongTensor(torch.tensor([128])).to("npu")
-    # return cu_seqlens[1:] - cu_seqlens[:-1]
-
-@triton.jit
-def safe_exp(x):
-    return tl.exp(tl.where(x <= 0, x, float("-inf")))
 
 @triton.heuristics(
     {
@@ -49,10 +34,10 @@ def chunk_fwd_kernel_o(
     chunk_offsets,
     scale,
     T,
-    H: tl.constexpr,
-    Hg: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
+    H,
+    Hg,
+    K,
+    V,
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
@@ -137,7 +122,6 @@ def chunk_fwd_o(
     B, T, Hg, K, V = *q.shape, v.shape[-1]
     H = v.shape[-2]
     BT = chunk_size
-    # BT = 128
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -151,20 +135,10 @@ def chunk_fwd_o(
             prepare_chunk_offsets(cu_seqlens, BT),
         )
 
-    # 128 128 1 8
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
-    
-    # print(V, "BV=128", N, H)
 
     g = g.transpose(1, 2).contiguous()
-    # print("11111111111111111111111111111111111111111111111111111")
-    
-    # 128 128 1 2
-    # print(V, "BV=128", N, H)
-    # q k v h 
-    # print(q.size(), k.size(), v.size(), h.size(), g.size())
-    print(cu_seqlens, chunk_offsets, scale, T, H, Hg, K, V)
     chunk_fwd_kernel_o[grid](
         q=q,
         k=k,
@@ -181,7 +155,7 @@ def chunk_fwd_o(
         K=K,
         V=V,
         BT=BT,
-        BK=256,
+        BK=128,
         BV=128,
         num_warps=4,
         num_stages=2,
