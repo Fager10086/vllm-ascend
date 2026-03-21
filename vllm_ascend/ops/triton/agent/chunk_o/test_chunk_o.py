@@ -1,0 +1,274 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
+#
+# This file contains code copied from the flash-linear-attention project.
+# The original source code was licensed under the MIT license and included
+# the following copyright notice:
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
+# ruff: noqa: E501
+# mypy: ignore-errors
+
+import torch
+import torch.nn.functional as F
+from vllm.triton_utils import tl, triton
+
+# from .utils import prepare_chunk_offsets, safe_exp
+def prepare_chunk_offsets(
+    cu_seqlens: torch.LongTensor, chunk_size: int
+) -> torch.LongTensor:
+    # print(prepare_lens(cu_seqlens),"*******************************")
+    return torch.cat(
+        [cu_seqlens.new_tensor([0]), triton.cdiv(torch.tensor([128]).to("npu"), chunk_size)]
+    ).cumsum(-1)
+
+def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
+    return torch.LongTensor(torch.tensor([128])).to("npu")
+    # return cu_seqlens[1:] - cu_seqlens[:-1]
+
+@triton.jit
+def safe_exp(x):
+    return tl.exp(tl.where(x <= 0, x, float("-inf")))
+
+@triton.heuristics(
+    {
+        "USE_G": lambda args: args["g"] is not None,
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    }
+)
+@triton.jit(do_not_specialize=["T"])
+def chunk_fwd_kernel_o(
+    q,
+    k,
+    v,
+    h,
+    g,
+    o,
+    cu_seqlens,
+    chunk_offsets,
+    scale,
+    T,
+    H: tl.constexpr,
+    Hg: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    USE_G: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n, i_h = i_nh // H, i_nh % H
+    T_max = T
+
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+        NT = tl.cdiv(T, BT)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
+    else:
+        bos, eos = i_n * T, i_n * T + T
+        NT = tl.cdiv(T, BT)
+        boh = i_n * NT
+
+    # offset calculation
+    q += (bos * Hg + i_h // (H // Hg)) * K
+    k += (bos * Hg + i_h // (H // Hg)) * K
+    v += (bos * H + i_h) * V
+    o += (bos * H + i_h) * V
+
+    for i_t in range(NT):
+        i_tg = boh + i_t
+        h_base = h + (i_tg * H + i_h).to(tl.int64) * K * V
+        b_o = tl.zeros([BT, BV], dtype=tl.float32)
+        b_A = tl.zeros([BT, BT], dtype=tl.float32)
+
+        for i_k in range(tl.cdiv(K, BK)):
+            p_q = tl.make_block_ptr(q, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_k = tl.make_block_ptr(k, (K, T), (1, Hg * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+            p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+            # [BT, BK]
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            # [BK, BT]
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            # [BK, BV]
+            b_h = tl.load(p_h, boundary_check=(0, 1))
+
+            # [BT, BK] @ [BK, BV] -> [BT, BV]
+            b_o += tl.dot(b_q, b_h)
+            # [BT, BK] @ [BK, BT] -> [BT, BT]
+            b_A += tl.dot(b_q, b_k)
+
+        if USE_G:
+            offs_t = i_t * BT + tl.arange(0, BT)
+            mask_t = offs_t < T
+            g_ptr = g + bos + i_h * T_max
+            b_g = tl.load(g_ptr + offs_t, mask=mask_t, other=0.0)
+
+            b_o = b_o * tl.exp(b_g)[:, None]
+            b_A = b_A * safe_exp(b_g[:, None] - b_g[None, :])
+
+        o_i = tl.arange(0, BT).to(tl.float32)
+        m_A = o_i[:, None] >= o_i[None, :]
+        b_A = tl.where(m_A, b_A, 0)
+
+        p_v = tl.make_block_ptr(v, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_o = tl.make_block_ptr(o, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        # to fix mma -> mma layout conversion
+        # already solved by fla v3.2 or higher
+        b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+
+
+def chunk_fwd_o(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    h: torch.Tensor,
+    g: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+) -> torch.Tensor:
+    B, T, Hg, K, V = *q.shape, v.shape[-1]
+    H = v.shape[-2]
+    BT = chunk_size
+    # BT = 128
+
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+
+    o = torch.empty_like(v)
+    if cu_seqlens is None:
+        N, chunk_offsets = B, None
+    else:
+        N, chunk_offsets = (
+            len(cu_seqlens) - 1,
+            prepare_chunk_offsets(cu_seqlens, BT),
+        )
+
+    # 128 128 1 8
+    def grid(meta):
+        return (triton.cdiv(V, meta["BV"]), N * H)
+    
+    # print(V, "BV=128", N, H)
+
+    g = g.transpose(1, 2).contiguous()
+    # print("11111111111111111111111111111111111111111111111111111")
+    
+    # 128 128 1 2
+    # print(V, "BV=128", N, H)
+    # q k v h 
+    # print(q.size(), k.size(), v.size(), h.size(), g.size())
+    print(cu_seqlens, chunk_offsets, scale, T, H, Hg, K, V)
+    chunk_fwd_kernel_o[grid](
+        q=q,
+        k=k,
+        v=v,
+        h=h,
+        g=g,
+        o=o,
+        cu_seqlens=cu_seqlens,
+        chunk_offsets=chunk_offsets,
+        scale=scale,
+        T=T,
+        H=H,
+        Hg=Hg,
+        K=K,
+        V=V,
+        BT=BT,
+        BK=256,
+        BV=128,
+        num_warps=4,
+        num_stages=2,
+    )
+    return o
+
+# ==================== 执行调用 ====================
+if __name__ == "__main__":
+    torch.manual_seed(42)
+    device = "npu"
+    dtype = torch.float16  # Triton对FP16/FP32支持最好
+
+    # 基础维度配置 (可根据需要调整)
+    T = 10288
+    H = 2
+    D = 128
+    dtype = torch.bfloat16
+    
+    # # 2. 生成输入张量
+    q = torch.randn((1, T, H, D), device=device, dtype=dtype)
+    # k = F.normalize(torch.randn(1, T, H, D, dtype=dtype, device=device), p=2, dim=-1).to(dtype)
+    k = torch.randn(1, T, H, D, device=device, dtype=dtype)
+    v = torch.randn((1, T, 8, D), device=device, dtype=dtype)
+    # u = torch.empty_like(v)
+    B, T, Hg, K, V = *k.shape, v.shape[-1]
+    chunk_size = 64
+    BT = chunk_size
+    NT = triton.cdiv(T, BT)
+    # print("************************************************************", B, NT, H, K, V)
+    h = k.new_empty(B, NT, 8, K, V)
+    g = torch.randn((1, T, 8), device=device, dtype=torch.float32)
+    scale = k.shape[-1] ** -0.5
+    cu_seqlens:list[int] = [0, 10288]
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+
+    chunk_fwd_o(
+        q=q,
+        k=k,
+        v=v,
+        h=h,
+        g=g,
+        scale=scale,
+        # cu_seqlens=None,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size
+    )
+
+    print("pass")
+
+# 调用示例
+# if __name__ == "__main__":
+#     # 设置随机种子
+#     torch.manual_seed(42)
+
+#     # 设备选择
+#     device = torch.device("cuda" if torch.cuda.is_available() else "npu")
+
+#     # 参数配置
+#     B = 1          # batch size
+#     T = 10288        # 序列长度（等长情况）
+#     Hg = 2         # query/key 的 head 数
+#     H = 16         # value 的 head 数（通常 H = Hg * group_size，这里随意）
+#     K = 128        # head 维度
+#     V = 64         # value 维度
+#     BT = 64        # chunk 大小
+
+#     # 生成随机输入
+#     q = torch.randn(B, T, Hg, K, device=device, dtype=torch.float16)
+#     k = torch.randn(B, T, Hg, K, device=device, dtype=torch.float16)
+#     v = torch.randn(B, T, H, V, device=device, dtype=torch.float16)
+
+#     # 计算 h 的形状：总 chunk 数 * H * K * V
+#     # 等长情况下，每个序列的 chunk 数为 NT = ceil(T/BT)，总 chunk 数为 B * NT
+#     NT = (T + BT - 1) // BT
+#     h_shape = (B , NT, H, K, V)
+#     # h = torch.randn(h_shape, device=device, dtype=torch.float16)
+#     h = torch.empty(h_shape, device=device, dtype=torch.float16)
+
+#     # 可选 g (shape: B, T, H)
+#     g = torch.randn(B, T, H, device=device, dtype=torch.float16)
+#     # g = torch.empty(B, T, H, device=device, dtype=torch.float16)
+
+#     scale = k.shape[-1] ** -0.5
+#     cu_seqlens:list[int] = [0, 128]
+#     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+#     # 等长情况调用
+#     o = chunk_fwd_o(q, k, v, h, g=g, scale=scale,
+#          cu_seqlens=cu_seqlens, chunk_size=BT)
+
+#     print("Script completed.")
