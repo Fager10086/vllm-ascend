@@ -1,43 +1,20 @@
-#!/usr/bin/env python3
-"""
-测试 recompute_w_u_fwd Triton 算子
-用于验证不同形状输入下的正确性和性能
-"""
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
+#
+# This file contains code copied from the flash-linear-attention project.
+# The original source code was licensed under the MIT license and included
+# the following copyright notice:
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
+# ruff: noqa: E501
+# mypy: ignore-errors
 
 import torch
-import triton
-import triton.language as tl
-import time
-import numpy as np
-from typing import Optional, Tuple
+from vllm.triton_utils import tl, triton
 
-# 假设 prepare_chunk_indices 函数已经定义
-def prepare_chunk_indices(cu_seqlens: torch.LongTensor, BT: int) -> torch.LongTensor:
-    """
-    准备分块索引
-    
-    参数:
-        cu_seqlens: 累计序列长度 [B+1]
-        BT: 块大小
-    
-    返回:
-        分块索引 [num_chunks, 2]
-    """
-    B = len(cu_seqlens) - 1
-    chunk_indices = []
-    
-    for i in range(B):
-        seq_start = cu_seqlens[i].item()
-        seq_end = cu_seqlens[i + 1].item()
-        seq_len = seq_end - seq_start
-        
-        # 为当前序列生成块
-        for chunk_start in range(0, seq_len, BT):
-            chunk_end = min(chunk_start + BT, seq_len)
-            chunk_idx = chunk_start // BT
-            chunk_indices.append([i, chunk_idx])
-    
-    return torch.tensor(chunk_indices, dtype=torch.int64, device=cu_seqlens.device)
+from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices
+
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.jit(do_not_specialize=["T"])
@@ -52,10 +29,10 @@ def recompute_w_u_fwd_kernel(
     cu_seqlens,
     chunk_indices,
     T,
-    H: tl.constexpr,
-    Hg: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
+    H,
+    Hg,
+    K,
+    V,
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
@@ -126,36 +103,20 @@ def recompute_w_u_fwd(
     A: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    重新计算 w 和 u
-    
-    参数:
-        k: 键张量 [B, T, Hg, K]
-        v: 值张量 [B, T, H, V]
-        beta: beta 张量 [B, T, H]
-        g_cumsum: 门控累积和 [B, T, H]
-        A: 注意力矩阵 [B, T, H, BT]
-        cu_seqlens: 累计序列长度 [B+1]
-    
-    返回:
-        w: [B, T, H, K]
-        u: [B, T, H, V]
-    """
-    B, T, Hg, K = k.shape
-    B, T, H, V = v.shape
-    BT = A.shape[-1]  # 块大小
-    
+    B, T, Hg, K, V = *k.shape, v.shape[-1]
+    H = v.shape[-2]
+    BT = A.shape[-1]
+
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    
-    BK = 128
-    BV = 128
-    
+
+    BK = 64
+    BV = 64
+
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
-    beta = beta.transpose(1, 2).contiguous()  # [B, H, T]
-    g_cumsum = g_cumsum.transpose(1, 2).contiguous()  # [B, H, T]
-    
+    beta = beta.transpose(1, 2).contiguous()
+    g_cumsum = g_cumsum.transpose(1, 2).contiguous()
     recompute_w_u_fwd_kernel[(NT, B)](
         k=k,
         v=v,
@@ -179,6 +140,9 @@ def recompute_w_u_fwd(
     )
     return w, u
 
+import time
+import numpy as np
+from typing import Optional, Tuple
 
 def test_single_case(
     B: int,
@@ -200,12 +164,12 @@ def test_single_case(
         (是否通过, 运行时间)
     """
     
-    if verbose:
-        print(f"\n{'='*60}")
-        print(f"测试配置:")
-        print(f"  B={B}, T={T}, H={H}, Hg={Hg}, K={K}, V={V}, BT={BT}")
-        print(f"  dtype={dtype}, device={device}, varlen={test_varlen}")
-        print(f"{'='*60}")
+    # if verbose:
+    #     print(f"\n{'='*60}")
+    #     print(f"测试配置:")
+    #     print(f"  B={B}, T={T}, H={H}, Hg={Hg}, K={K}, V={V}, BT={BT}")
+    #     print(f"  dtype={dtype}, device={device}, varlen={test_varlen}")
+    #     print(f"{'='*60}")
     
     # 创建随机输入
     torch.manual_seed(42)
@@ -257,10 +221,10 @@ def test_single_case(
     torch.cuda.synchronize() if device == "cuda" else None
     elapsed = time.time() - start_time
     
-    if verbose:
-        print(f"Triton 计算完成，耗时: {elapsed*1000:.2f}ms")
-        print(f"w 形状: {w_triton.shape}")
-        print(f"u 形状: {u_triton.shape}")
+    # if verbose:
+    #     print(f"Triton 计算完成，耗时: {elapsed*1000:.2f}ms")
+    #     print(f"w 形状: {w_triton.shape}")
+    #     print(f"u 形状: {u_triton.shape}")
     
     # 创建参考实现（简化验证）
     # 注意：由于计算复杂，这里只验证形状和基本数值特性
@@ -271,32 +235,32 @@ def test_single_case(
     expected_u_shape = (B, T_total, H, V) if not test_varlen else (B, T_total, H, V)
     
     if w_triton.shape != expected_w_shape:
-        print(f"❌ w 形状错误: 期望 {expected_w_shape}, 实际 {w_triton.shape}")
+        # print(f"❌ w 形状错误: 期望 {expected_w_shape}, 实际 {w_triton.shape}")
         passed = False
     
     if u_triton.shape != expected_u_shape:
-        print(f"❌ u 形状错误: 期望 {expected_u_shape}, 实际 {u_triton.shape}")
+        # print(f"❌ u 形状错误: 期望 {expected_u_shape}, 实际 {u_triton.shape}")
         passed = False
     
     # 2. 验证数值范围（简化检查）
     if torch.any(torch.isnan(w_triton)):
-        print("❌ w 包含 NaN")
+        # print("❌ w 包含 NaN")
         passed = False
     
     if torch.any(torch.isnan(u_triton)):
-        print("❌ u 包含 NaN")
+        # print("❌ u 包含 NaN")
         passed = False
     
     if torch.any(torch.isinf(w_triton)):
-        print("❌ w 包含 Inf")
+        # print("❌ w 包含 Inf")
         passed = False
     
     if torch.any(torch.isinf(u_triton)):
-        print("❌ u 包含 Inf")
+        # print("❌ u 包含 Inf")
         passed = False
     
-    if verbose and passed:
-        print("✅ 测试通过")
+    # if verbose and passed:
+        # print("✅ 测试通过")
     
     return passed, elapsed
 
@@ -338,8 +302,8 @@ def test_multiple_shapes():
     #     test_configs = [(B, T, H, Hg, K, V, BT, dtype, "cpu", varlen) 
     #                    for B, T, H, Hg, K, V, BT, dtype, _, varlen in test_configs]
     
-    print("🧪 开始多形状测试")
-    print("=" * 80)
+    # print("🧪 开始多形状测试")
+    # print("=" * 80)
     
     results = []
     total_passed = 0
@@ -371,7 +335,7 @@ def test_multiple_shapes():
             total_tests += 1
             timings.append(elapsed * 1000)
             
-            print(f"{status} | 耗时: {elapsed*1000:.2f}ms")
+            # print(f"{status} | 耗时: {elapsed*1000:.2f}ms")
             
         except Exception as e:
             print(f"❌ 异常: {e}")
@@ -382,37 +346,36 @@ def test_multiple_shapes():
             })
             total_tests += 1
     
-    # 统计结果
-    print("\n" + "=" * 80)
-    print("📊 测试总结")
-    print("=" * 80)
-    print(f"总测试数: {total_tests}")
-    print(f"通过数: {total_passed}")
-    print(f"失败数: {total_tests - total_passed}")
-    print(f"通过率: {total_passed/total_tests*100:.1f}%")
+    # # 统计结果
+    # print("\n" + "=" * 80)
+    # print("📊 测试总结")
+    # print("=" * 80)
+    # print(f"总测试数: {total_tests}")
+    # print(f"通过数: {total_passed}")
+    # print(f"失败数: {total_tests - total_passed}")
+    # print(f"通过率: {total_passed/total_tests*100:.1f}%")
     
-    if timings:
-        print(f"平均耗时: {np.mean(timings):.2f}ms")
-        print(f"最小耗时: {np.min(timings):.2f}ms")
-        print(f"最大耗时: {np.max(timings):.2f}ms")
+    # if timings:
+    #     print(f"平均耗时: {np.mean(timings):.2f}ms")
+    #     print(f"最小耗时: {np.min(timings):.2f}ms")
+    #     print(f"最大耗时: {np.max(timings):.2f}ms")
     
     return results
 
 def main():
-    """
-    主测试函数
-    """
-    print("🧪 recompute_w_u_fwd 算子测试套件")
-    print("=" * 80)
+    # """
+    # 主测试函数
+    # """
+    # print("🧪 recompute_w_u_fwd 算子测试套件")
+    # print("=" * 80)
     
-    # 1. 测试多种形状
-    print("\n📋 测试 1: 多形状测试")
+    # # 1. 测试多种形状
+    # print("\n📋 测试 1: 多形状测试")
     results = test_multiple_shapes()
 
     
-    print("\n" + "=" * 80)
-    print("🎉 所有测试完成")
-
+    # print("\n" + "=" * 80)
+    # print("🎉 所有测试完成")
 
 if __name__ == "__main__":
     main()
