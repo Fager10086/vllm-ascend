@@ -1,7 +1,3 @@
-# Copyright © 2025 Huawei Technologies Co., Ltd.
-# Based on vLLM: https://github.com/vllm-project/vllm
-# Based on flash-linear-attention: https://github.com/fla-org/flash-linear-attention
-#
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
@@ -11,262 +7,430 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
+# mypy: ignore-errors
 
-import os
-from typing import Optional
-
-import pytest
 import torch
-import torch.nn.functional as F
-from einops import rearrange, repeat
+from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_fwd
+from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
 
-device = "npu"
-
-
-def get_abs_err(x, y):
-    return (x.detach() - y.detach()).flatten().abs().max().item()
+from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices
 
 
-def get_err_ratio(x, y):
-    err = (x.detach() - y.detach()).flatten().square().mean().sqrt().item()
-    base = (x.detach()).flatten().square().mean().sqrt().item()
-    return err / (base + 1e-8)
-
-
-def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
-    abs_atol = get_abs_err(ref, tri)
-    msg = f"{prefix:>16} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    error_rate = get_err_ratio(ref, tri)
-    if abs_atol <= err_atol:
-        return
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.jit(do_not_specialize=["T"])
+def solve_tril_16x16_kernel(
+    A,
+    Ad,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H,
+    BT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    LARGE_BLOCK_T: tl.constexpr,
+):
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n, i_t = (
+            tl.load(chunk_indices + i_t * 2).to(tl.int32),
+            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+        )
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
+        T = eos - bos
     else:
-        assert error_rate < ratio, msg
+        bos, eos = i_b * T, i_b * T + T
+
+    A = A + (bos * H + i_h) * BT
+    Ad = Ad + (bos * H + i_h) * 16
+
+    base_t = i_t * LARGE_BLOCK_T
+
+    NTASKS: tl.constexpr = 2
+    N_BLOCKS: tl.constexpr = LARGE_BLOCK_T // 16 // NTASKS
+
+    for taskid in range(0, NTASKS):
+        base_t += taskid * (LARGE_BLOCK_T // NTASKS)
+
+        # use make_block_ptr to reduce vector computation
+        b_A = tl.zeros((N_BLOCKS, 16, 16), dtype=tl.float32)
+        for blkid in range(0, N_BLOCKS):
+            row_start_o = base_t + blkid * 16
+            col_start_o = row_start_o % BT
+
+            # 1 Create in-block offset
+            offs_rows_in_block = tl.arange(0, 16)
+            offs_cols_in_block = tl.arange(0, 16)
+
+            # 2 Calculate the pointer of each element
+            ptr_A_subrec16 = (
+                A
+                + row_start_o * H * BT
+                + col_start_o
+                + offs_rows_in_block[:, None] * H * BT
+                + offs_cols_in_block[None, :]
+            )
+
+            # 3 Create a mask to prevent out-of-bounds access
+            global_rows = row_start_o + offs_rows_in_block[:, None]
+            global_cols = col_start_o + offs_cols_in_block[None, :]
+            load_mask = (global_rows < T) & (global_cols < BT)
+
+            # 4 Use mask to safely load data
+            b_A_subrec16 = tl.load(ptr_A_subrec16, mask=load_mask, other=0.0).to(tl.float32)
+            b_A = insert_slice(
+                ful=b_A,
+                sub=b_A_subrec16[None, :, :],  # (1, 16, 16)
+                offsets=[blkid, 0, 0],
+                sizes=[1, 16, 16],
+                strides=[1, 1, 1],
+            )
+
+        local_ori_A = tl.trans(b_A, (1, 0, 2))
+        local_ori_A = tl.reshape(local_ori_A, (16, 16 * N_BLOCKS))
+
+        # Convert mask into matrix multiplication to avoid for loops ub oom
+        tmp = tl.arange(0, 16).to(tl.float32)
+        rows = tmp[:, None]
+        cols = tmp[None, :]
+        is_lower = (rows > cols).to(b_A.dtype)
+        b_A = -b_A * is_lower
+
+        # for loop to update N_BLOCKS row vector
+        for i in range(1, 16):
+            nblks_vec16 = -extract_slice(local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (16 * N_BLOCKS, 1))
+            b_a = tl.reshape(nblks_vec16, (N_BLOCKS, 16))
+
+            dot_tmp = tl.trans(b_a[:, :, None] * b_A, (1, 0, 2))
+            dot_product = tl.sum(dot_tmp, 0)
+            b_a = b_a + dot_product
+
+            b_a_new_expanded = b_a[:, None, :]
+            b_A = insert_slice(
+                ful=b_A, sub=b_a_new_expanded, offsets=[0, i, 0], sizes=[N_BLOCKS, 1, 16], strides=[1, 1, 1]
+            )
+
+        on_diagonal = rows == cols
+        b_A = tl.where(on_diagonal, b_A + 1.0, b_A)
+
+        b_A = tl.reshape(b_A, (N_BLOCKS * 16, 16))
+        p_Ai = tl.make_block_ptr(Ad, (T, 16), (H * 16, 1), (base_t, 0), (N_BLOCKS * 16, 16), (1, 0))
+
+        # 1 Create in-block offset
+        offs_rows_to_store = tl.arange(0, N_BLOCKS * 16)
+        offs_cols_to_store = tl.arange(0, 16)
+
+        # 2 Calculate the pointer of each element
+        p_Ai = Ad + base_t * H * 16 + 0 + offs_rows_to_store[:, None] * H * 16 + offs_cols_to_store[None, :]
+        # 3 Create a mask to prevent out-of-bounds access, only check rows
+        global_store_rows = base_t + offs_rows_to_store[:, None]
+        store_mask = global_store_rows < T
+        # 4 use mask to save data safely
+        tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), mask=store_mask)
 
 
-def print_diff(name, ref, tri, atol=0.005):
-    abs_diff = torch.abs(ref - tri)
-    max_abs_diff = abs_diff.max().item()
-    print(f"[{name}] Max absolute difference: {max_abs_diff:.6f}")
-    if max_abs_diff > atol:
-        print(f"Exceeds tolerance ({atol})!")
-
-
-def recurrent_gated_delta_rule_ref(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    beta: torch.Tensor,
-    g: torch.Tensor,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
-    output_final_state: bool = False,
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.jit(do_not_specialize=["T"])
+def merge_16x16_to_32x32_inverse_kernel(
+    A,
+    Ad,
+    Ai,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H,
+    BT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
-    q, k, v, beta, g = map(
-        lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g]
-    )
-    B, H, T, K, V = *k.shape, v.shape[-1]
-    o = torch.zeros(B, H, T, V).to(v)
-    h = torch.zeros(B, H, K, V).to(v)
-    if initial_state is not None:
-        h = initial_state
-    if scale is None:
-        scale = 1 / (q.shape[-1] ** 0.5)
-    q = q * scale
-    for i in range(T):
-        b_q = q[:, :, i]
-        b_k = k[:, :, i]
-        b_v = v[:, :, i].clone()
-        h = h.clone() * g[:, :, i].exp()[..., None, None]
-        b_beta = beta[:, :, i]
-        b_v = b_v - (h.clone() * b_k[..., None]).sum(-2)
-        b_v = b_v * b_beta[..., None]
-        h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2)
-        o[:, :, i] = torch.einsum("bhd,bhdm->bhm", b_q, h)
-    if not output_final_state:
-        h = None
-    o = o.transpose(1, 2).contiguous()
-    return o, h
-
-
-def chunk_gated_delta_rule_ref(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    chunk_size: int = 64,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
-    output_final_state: bool = False,
-):
-    BT = chunk_size
-    if scale is None:
-        scale = 1 / (q.shape[-1] ** 0.5)
-    # Calculate padding needed to make T a multiple of BT
-    q, k, v, beta, g = map(
-        lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g]
-    )
-
-    T = q.shape[-2]
-    pad_len = (BT - (T % BT)) % BT
-    if pad_len > 0:
-        # Pad all tensors
-        q = F.pad(q, (0, 0, 0, pad_len))
-        k = F.pad(k, (0, 0, 0, pad_len))
-        v = F.pad(v, (0, 0, 0, pad_len))
-        beta = F.pad(beta, (0, pad_len))
-        g = F.pad(g, (0, pad_len))
-    q, k, v, beta, g = map(lambda x: x.to(torch.float32), [q, k, v, beta, g])
-    decay = g
-    chunk_size = BT
-    b, h, l, d_k = q.shape
-    d_v = v.shape[-1]
-    q = q * scale
-    v = v * beta[..., None]
-    k_beta = k * beta[..., None]
-    assert l % chunk_size == 0
-    # note that diagonal is masked.
-    mask = torch.triu(
-        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device),
-        diagonal=0,
-    )
-    q, k, v, k_beta, decay = map(
-        lambda x: rearrange(x, "b h (n c) d -> b h n c d", c=chunk_size),
-        [q, k, v, k_beta, decay.unsqueeze(-1)],
-    )
-    decay = decay.squeeze(-1).cumsum(-1)
-    decay_exp = decay.exp()[..., None]
-    L_mask = ((decay.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
-    attn = -((k_beta @ k.transpose(-1, -2)) * L_mask).masked_fill(mask, 0)
-    for i in range(1, chunk_size):
-        attn[..., i, :i] = attn[..., i, :i].clone() + (
-            attn[..., i, :i, None].clone() * attn[..., :i, :i].clone()
-        ).sum(-2)
-    attn = attn + torch.eye(chunk_size, dtype=torch.float, device=q.device)
-    attn = attn
-    k_cumsum = attn @ v
-    k_cumdecay = attn @ (k_beta * decay_exp)
-    v = k_cumsum
-    S = k.new_zeros(b, h, d_k, d_v)
-    if initial_state is not None:
-        S = initial_state
-    o = torch.zeros_like(v)
-    mask = torch.triu(
-        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device),
-        diagonal=1,
-    )
-    for i in range(0, l // chunk_size):
-        q_i, k_i, v_i = q[:, :, i], k[:, :, i], v[:, :, i]
-        attn = (q_i @ k_i.transpose(-1, -2) * L_mask[:, :, i]).masked_fill_(mask, 0)
-        v_prime = (k_cumdecay[:, :, i]) @ S
-        v_new = v_i - v_prime
-        o_inter = (q_i * decay[:, :, i, :, None].exp()) @ S
-        o[:, :, i] = o_inter + attn @ v_new
-        S = (
-            S * decay[:, :, i, -1, None, None].exp()
-            + (
-                k_i * (decay[:, :, i, -1, None] - decay[:, :, i]).exp()[..., None]
-            ).transpose(-1, -2)
-            @ v_new
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n, i_t = (
+            tl.load(chunk_indices + i_t * 2).to(tl.int32),
+            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
         )
-    if not output_final_state:
-        S = None
-    # unpad
-    o = rearrange(o, "b h n c d -> b h (n c) d")
-    o = o[:, :, :T]
-    o = o.transpose(1, 2)
-    return o, S
-
-
-@pytest.mark.parametrize(
-    ("H", "D", "mask_p", "cu_seqlens", "dtype"),
-    [
-        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
-        for test in [
-            (8, 128, 0, [0, 6], torch.float16),
-            (8, 128, 0, [0, 15], torch.float16),
-            (8, 128, 0, [0, 24], torch.float16),
-            (8, 128, 0, [0, 31], torch.float16),
-            (8, 128, 0, [0, 32], torch.float16),
-            (8, 128, 0, [0, 33], torch.float16),
-            (8, 128, 0, [0, 48], torch.float16),
-            (8, 128, 0, [0, 63], torch.float16),
-            (8, 128, 0, [0, 64], torch.float16),
-            (8, 128, 0, [0, 64], torch.float16),
-            (8, 128, 0, [0, 76], torch.float16),
-            (8, 128, 0, [0, 84], torch.float16),
-            (8, 128, 0, [0, 96], torch.float16),
-            (8, 128, 0, [0, 100], torch.float16),
-            (8, 128, 0, [0, 115], torch.float16),
-            (8, 128, 0, [0, 127], torch.float16),
-            (8, 128, 0, [0, 128], torch.float16),
-        ]
-    ],
-)
-def test_accuracy_chunk_varlen(
-    H: int,
-    D: int,
-    mask_p: float,
-    cu_seqlens: list[int],
-    dtype: torch.dtype,
-):
-    if D != 128:
-        pytest.skip(
-            reason="chunk_gated_delta_rule is not supported on alchemist for D!=128"
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
         )
-    torch.manual_seed(42)
-    os.environ["TRITON_F32_DEFAULT"] = "ieee"
-    # randomly split the sequence into N segments
-    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
-    T = cu_seqlens[-1]
-    N = len(cu_seqlens) - 1
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
 
-    # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, H, D), dtype=dtype)
-    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn((1, T, H, D), dtype=dtype)
-    g = F.logsigmoid(torch.rand(1, T, H, dtype=torch.float32))
-    g = g * (torch.rand_like(g) > mask_p)
-    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn((N, H, D, D), dtype=dtype)
+    A += (bos * H + i_h) * 32
+    Ad += (bos * H + i_h) * 16
+    Ai += (bos * H + i_h) * 32
 
-    q, k, v, beta, g, h0 = map(
-        lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0)
+    p_A_21 = tl.make_block_ptr(A, (T, 32), (H * 32, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0))
+    p_Ad_11 = tl.make_block_ptr(Ad, (T, 16), (H * 16, 1), (i_t * 32, 0), (16, 16), (1, 0))
+    p_Ad_22 = tl.make_block_ptr(Ad, (T, 16), (H * 16, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0))
+    p_Ai_11 = tl.make_block_ptr(Ai, (T, 32), (H * 32, 1), (i_t * 32, 0), (16, 16), (1, 0))
+    p_Ai_22 = tl.make_block_ptr(Ai, (T, 32), (H * 32, 1), (i_t * 32 + 16, 16), (16, 16), (1, 0))
+    p_Ai_21 = tl.make_block_ptr(Ai, (T, 32), (H * 32, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0))
+
+    A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
+    Ai_11 = tl.load(p_Ad_11, boundary_check=(0, 1)).to(tl.float32)
+    Ai_22 = tl.load(p_Ad_22, boundary_check=(0, 1)).to(tl.float32)
+    Ai_21 = -tl.dot(
+        tl.dot(Ai_22, A_21, input_precision="ieee"),
+        Ai_11,
+        input_precision="ieee",
+    )
+    tl.store(
+        p_Ai_11,
+        Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        p_Ai_22,
+        Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        p_Ai_21,
+        Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
     )
 
-    _, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
-        q=q.clone(),
-        k=k.clone(),
-        v=v.clone(),
-        beta=beta.clone(),
-        g=g.clone(),
-        scale=None,
-        initial_state=h0.clone(),
-        output_final_state=True,
+
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.jit(do_not_specialize=["T"])
+def merge_16x16_to_64x64_inverse_kernel(
+    A,
+    Ad,
+    Ai,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H,
+    BT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n, i_t_val = (
+            tl.load(chunk_indices + i_t * 2).to(tl.int32),
+            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+        )
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
+        T = eos - bos
+        i_t = i_t_val
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    # Base pointers (already offset by batch and head)
+    A += (bos * H + i_h) * 64
+    Ad += (bos * H + i_h) * 16
+    Ai += (bos * H + i_h) * 64
+
+    # load Ai_22 (Ad block at row i_t * 64 + 16, col 0, 16 * 16)
+    offs_m = i_t * 64 + 16 + tl.arange(0, 16)
+    offs_n = tl.arange(0, 16)
+    mask_Ad = (offs_m[:, None] < T) & (offs_n[None, :] < 16)
+    ptr_Ad = Ad + offs_m[:, None] * (H * 16) + offs_n[None, :]
+    Ai_22 = tl.load(ptr_Ad, mask=mask_Ad, other=0.0).to(tl.float32)
+
+    # load A_21 (A block at row i_t * 64 + 16, col 0, 16 * 16)
+    mask_A = (offs_m[:, None] < T) & (offs_n[None, :] < 64)
+    ptr_A = A + offs_m[:, None] * (H * 64) + offs_n[None, :]
+    A_21 = tl.load(ptr_A, mask=mask_A, other=0.0).to(tl.float32)
+    tmp = tl.dot(Ai_22, A_21, input_precision="ieee")
+
+    # load Ai_11 (Ad block at row i_t * 64, col 0, 16 * 16)
+    offs_m = i_t * 64 + tl.arange(0, 16)
+    offs_n = tl.arange(0, 16)
+    mask_Ad = (offs_m[:, None] < T) & (offs_n[None, :] < 16)
+    ptr_Ad = Ad + offs_m[:, None] * (H * 16) + offs_n[None, :]
+    Ai_11 = tl.load(ptr_Ad, mask=mask_Ad, other=0.0).to(tl.float32)
+
+    Ai_21 = -tl.dot(tmp, Ai_11, input_precision="ieee")
+
+    # load Ai_44 (Ad block at row i_t * 64 + 48, col 0, 16 * 16)
+    offs_m = i_t * 64 + 48 + tl.arange(0, 16)
+    offs_n = tl.arange(0, 16)
+    mask_Ad = (offs_m[:, None] < T) & (offs_n[None, :] < 16)
+    ptr_Ad = Ad + offs_m[:, None] * (H * 16) + offs_n[None, :]
+    Ai_44 = tl.load(ptr_Ad, mask=mask_Ad, other=0.0).to(tl.float32)
+
+    # load A_43 (Ad block at row i_t * 64 + 48, col 32, 16 * 16)
+    offs_n = 32 + tl.arange(0, 16)
+    mask_A = (offs_m[:, None] < T) & (offs_n[None, :] < 64)
+    ptr_A = A + offs_m[:, None] * (H * 64) + offs_n[None, :]
+    A_43 = tl.load(ptr_A, mask=mask_A, other=0.0).to(tl.float32)
+    tmp = tl.dot(Ai_44, A_43, input_precision="ieee")
+
+    # load Ai_33 (Ad block at row i_t * 64 + 32, col 0, 16 * 16)
+    offs_m = i_t * 64 + 32 + tl.arange(0, 16)
+    offs_n = tl.arange(0, 16)
+    mask_Ad = (offs_m[:, None] < T) & (offs_n[None, :] < 16)
+    ptr_Ad = Ad + offs_m[:, None] * (H * 16) + offs_n[None, :]
+    Ai_33 = tl.load(ptr_Ad, mask=mask_Ad, other=0.0).to(tl.float32)
+
+    Ai_43 = -tl.dot(tmp, Ai_33, input_precision="ieee")
+
+    # build Ai_22_32 (32 * 32)
+    Ai_22_32 = tl.zeros((32, 32), tl.float32)
+    Ai_22_32 = insert_slice(Ai_22_32, Ai_33, (0, 0), (16, 16), (1, 1))
+    Ai_22_32 = insert_slice(Ai_22_32, Ai_44, (16, 16), (16, 16), (1, 1))
+    Ai_22_32 = insert_slice(Ai_22_32, Ai_43, (16, 0), (16, 16), (1, 1))
+
+    # load A_21_32 (A block at row i_t * 64 + 32, col 0, 32 * 32)
+    offs_m = i_t * 64 + 32 + tl.arange(0, 32)
+    offs_n = tl.arange(0, 32)
+    mask_A = (offs_m[:, None] < T) & (offs_n[None, :] < 64)
+    ptr_A = A + offs_m[:, None] * (H * 64) + offs_n[None, :]
+    A_21_32 = tl.load(ptr_A, mask=mask_A, other=0.0).to(tl.float32)
+    tmp = tl.dot(Ai_22_32, A_21_32, input_precision="ieee")
+
+    # build Ai_11_32 (32 * 32)
+    Ai_11_32 = tl.zeros((32, 32), tl.float32)
+    Ai_11_32 = insert_slice(Ai_11_32, Ai_11, (0, 0), (16, 16), (1, 1))
+    Ai_11_32 = insert_slice(Ai_11_32, Ai_22, (16, 16), (16, 16), (1, 1))
+    Ai_11_32 = insert_slice(Ai_11_32, Ai_21, (16, 0), (16, 16), (1, 1))
+
+    Ai_21_32 = -tl.dot(tmp, Ai_11_32, input_precision="ieee")
+
+    # store Ai_11_32 to (i_t * 64, 0)
+    offs_m = i_t * 64 + tl.arange(0, 32)
+    offs_n = tl.arange(0, 32)
+    mask_store = (offs_m[:, None] < T) & (offs_n[None, :] < 64)
+    ptr_Ai = Ai + offs_m[:, None] * (H * 64) + offs_n[None, :]
+    tl.store(ptr_Ai, Ai_11_32.to(ptr_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), mask=mask_store)
+
+    # store Ai_22_32 to (i_t * 64 + 32, 32)
+    offs_m = i_t * 64 + 32 + tl.arange(0, 32)
+    offs_n = 32 + tl.arange(0, 32)
+    mask_store = (offs_m[:, None] < T) & (offs_n[None, :] < 64)
+    ptr_Ai = Ai + offs_m[:, None] * (H * 64) + offs_n[None, :]
+    tl.store(ptr_Ai, Ai_22_32.to(ptr_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), mask=mask_store)
+
+    # store Ai_21_32 to (i_t * 64 + 32, 32)
+    offs_n = tl.arange(0, 32)
+    mask_store = (offs_m[:, None] < T) & (offs_n[None, :] < 64)
+    ptr_Ai = Ai + offs_m[:, None] * (H * 64) + offs_n[None, :]
+    tl.store(ptr_Ai, Ai_21_32.to(ptr_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), mask=mask_store)
+
+    # zero out the upper-right 32 * 32 block (rows 0 ~ 31, cols 32 ~ 63)
+    offs_m = i_t * 64 + tl.arange(0, 32)
+    offs_n = 32 + tl.arange(0, 32)
+    mask_store = (offs_m[:, None] < T) & (offs_n[None, :] < BT)
+    ptr_Ai = Ai + offs_m[:, None] * (H * BT) + offs_n[None, :]
+    zero_block = tl.zeros((32, 32), dtype=ptr_Ai.dtype.element_ty)
+    tl.store(ptr_Ai, zero_block, mask=mask_store)
+
+
+def solve_tril(
+    A: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float,
+) -> torch.Tensor:
+    """
+    Compute the inverse of the matrix I + A
+    A should be strictly lower triangular, i.e., A.triu() == 0.
+
+    Args:
+        A (torch.Tensor):
+            [B, T, H, BT], where BT should only be 16, 32, or 64.
+        cu_seqlens (torch.Tensor):
+            The cumulative sequence lengths of the input tensor. Default: `None`.
+        output_dtype (torch.dtype):
+            The dtype of the output tensor. Default: `torch.float`.
+            If `None`, the output dtype will be the same as the input dtype.
+
+    Returns:
+        (I + A)^-1 with the same shape as A
+    """
+    assert A.shape[-1] in [16, 32, 64]
+    B, T, H, BT = A.shape
+    Ad = torch.empty(B, T, H, 16, device=A.device, dtype=torch.float if BT != 16 else output_dtype)
+
+    LARGE_BLOCK_T = 608 * 2
+
+    chunk_indices = prepare_chunk_indices(cu_seqlens, LARGE_BLOCK_T) if cu_seqlens is not None else None
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, LARGE_BLOCK_T)
+
+    solve_tril_16x16_kernel[NT, B * H](
+        A=A,
+        Ad=Ad,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        BT=BT,
+        LARGE_BLOCK_T=LARGE_BLOCK_T,
+        num_warps=1,
+        num_stages=4,
     )
 
-    ref = []
-    ref_ht = []
-    for i in range(N):
-        ref_i, ref_ht_i = recurrent_gated_delta_rule_ref(
-            q=q[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            k=k[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            v=v[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            beta=beta[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            g=g[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            initial_state=h0[i],
-            output_final_state=True,
-        )
-        ref.append(ref_i)
-        ref_ht.append(ref_ht_i)
-    ref = torch.cat(ref, 1)
-    ref_ht = torch.cat(ref_ht, 0)
+    if BT == 16:
+        return Ad
 
-    print_diff("o", ref, o, 0.005)
-    print_diff("ht", ref_ht, final_state, 0.005)
+    Ai = torch.empty(B, T, H, BT, device=A.device, dtype=output_dtype)
+    merge_fn = merge_16x16_to_32x32_inverse_kernel if BT == 32 else merge_16x16_to_64x64_inverse_kernel
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
-    assert_close("o", ref, o, 0.005)
-    assert_close("ht", ref_ht, final_state, 0.005)
+    merge_fn[NT, B * H](
+        A=A,
+        Ad=Ad,
+        Ai=Ai,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        BT=BT,
+        num_warps=4,
+        num_stages=3,
+    )
+    return Ai
+
+import time
+import numpy as np
+from typing import Optional, Tuple
+
+# ==================== 执行调用 ====================
+if __name__ == "__main__":
+    torch.manual_seed(42)
+    B, T, H, Hg, K, V, BT, dtype, device, varle = (1, 10288, 8, 2, 128, 128, 64, torch.float16, "npu", True)
+    
+    if varle:
+        # 变长序列测试
+        seqlens = []
+        for _ in range(B):
+            # 每个序列长度在 [T//2, T] 之间随机
+            seq_len = torch.randint(T//2, T+1, (1,)).item()
+            seqlens.append(seq_len)
+        
+        cu_seqlens = torch.tensor([0] + np.cumsum(seqlens).tolist(), 
+                                 dtype=torch.int64, device=device)
+        T_total = cu_seqlens[-1].item()
+        
+        # 创建变长张量
+        k = torch.randn(B, T_total, Hg, K, dtype=dtype, device=device)
+        v = torch.randn(B, T_total, H, V, dtype=dtype, device=device)
+        beta = torch.randn(B, T_total, H, dtype=dtype, device=device)
+        g_cumsum = torch.randn(B, T_total, H, dtype=dtype, device=device)
+        A = torch.randn(B, T_total, H, BT, dtype=dtype, device=device)
+    
+    # 预热
+    for _ in range(20):
+        Ai = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+    
+    # 计时
+    torch.npu.synchronize() if device == "npu" else None
+    start_time = time.time()
+    
+    Ai = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+    
+    torch.npu.synchronize() if device == "npu" else None
+    elapsed = time.time() - start_time
+
+    print("pass")
