@@ -1,5 +1,5 @@
 https://github.com/Fager10086/vllm-ascend/tree/main/vllm_ascend/ops/triton/fla用这里的fla代替环境上的fla（整个目录替换）
 把test_chunk这个目录复制到系统上任意一个地方
 然后把solve_tril.py文件替换掉fla目录下的同名文件
-精度与功能正确性验证用 `python -m pytest test_solve_tri.py`；
+精度与功能正确性验证用 `python -m pytest test_cumseum.py`；
 性能测试用 `msprof op --output=/home/ --kernel-name="chunk" --warm-up=20 --launch-count=40 python3 /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/solve_tril.py`
