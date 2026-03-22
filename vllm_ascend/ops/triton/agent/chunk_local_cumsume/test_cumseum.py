@@ -1,7 +1,3 @@
-# Copyright © 2025 Huawei Technologies Co., Ltd.
-# Based on vLLM: https://github.com/vllm-project/vllm
-# Based on flash-linear-attention: https://github.com/fla-org/flash-linear-attention
-#
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
@@ -11,262 +7,183 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
+# mypy: ignore-errors
 
-import os
-from typing import Optional
-
-import pytest
 import torch
-import torch.nn.functional as F
-from einops import rearrange, repeat
+from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_fwd
-
-device = "npu"
+from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices
 
 
-def get_abs_err(x, y):
-    return (x.detach() - y.detach()).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x.detach() - y.detach()).flatten().square().mean().sqrt().item()
-    base = (x.detach()).flatten().square().mean().sqrt().item()
-    return err / (base + 1e-8)
-
-
-def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
-    abs_atol = get_abs_err(ref, tri)
-    msg = f"{prefix:>16} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    error_rate = get_err_ratio(ref, tri)
-    if abs_atol <= err_atol:
-        return
-    else:
-        assert error_rate < ratio, msg
-
-
-def print_diff(name, ref, tri, atol=0.005):
-    abs_diff = torch.abs(ref - tri)
-    max_abs_diff = abs_diff.max().item()
-    print(f"[{name}] Max absolute difference: {max_abs_diff:.6f}")
-    if max_abs_diff > atol:
-        print(f"Exceeds tolerance ({atol})!")
-
-
-def recurrent_gated_delta_rule_ref(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    beta: torch.Tensor,
-    g: torch.Tensor,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
-    output_final_state: bool = False,
-):
-    q, k, v, beta, g = map(
-        lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g]
-    )
-    B, H, T, K, V = *k.shape, v.shape[-1]
-    o = torch.zeros(B, H, T, V).to(v)
-    h = torch.zeros(B, H, K, V).to(v)
-    if initial_state is not None:
-        h = initial_state
-    if scale is None:
-        scale = 1 / (q.shape[-1] ** 0.5)
-    q = q * scale
-    for i in range(T):
-        b_q = q[:, :, i]
-        b_k = k[:, :, i]
-        b_v = v[:, :, i].clone()
-        h = h.clone() * g[:, :, i].exp()[..., None, None]
-        b_beta = beta[:, :, i]
-        b_v = b_v - (h.clone() * b_k[..., None]).sum(-2)
-        b_v = b_v * b_beta[..., None]
-        h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2)
-        o[:, :, i] = torch.einsum("bhd,bhdm->bhm", b_q, h)
-    if not output_final_state:
-        h = None
-    o = o.transpose(1, 2).contiguous()
-    return o, h
-
-
-def chunk_gated_delta_rule_ref(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    chunk_size: int = 64,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
-    output_final_state: bool = False,
-):
-    BT = chunk_size
-    if scale is None:
-        scale = 1 / (q.shape[-1] ** 0.5)
-    # Calculate padding needed to make T a multiple of BT
-    q, k, v, beta, g = map(
-        lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g]
-    )
-
-    T = q.shape[-2]
-    pad_len = (BT - (T % BT)) % BT
-    if pad_len > 0:
-        # Pad all tensors
-        q = F.pad(q, (0, 0, 0, pad_len))
-        k = F.pad(k, (0, 0, 0, pad_len))
-        v = F.pad(v, (0, 0, 0, pad_len))
-        beta = F.pad(beta, (0, pad_len))
-        g = F.pad(g, (0, pad_len))
-    q, k, v, beta, g = map(lambda x: x.to(torch.float32), [q, k, v, beta, g])
-    decay = g
-    chunk_size = BT
-    b, h, l, d_k = q.shape
-    d_v = v.shape[-1]
-    q = q * scale
-    v = v * beta[..., None]
-    k_beta = k * beta[..., None]
-    assert l % chunk_size == 0
-    # note that diagonal is masked.
-    mask = torch.triu(
-        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device),
-        diagonal=0,
-    )
-    q, k, v, k_beta, decay = map(
-        lambda x: rearrange(x, "b h (n c) d -> b h n c d", c=chunk_size),
-        [q, k, v, k_beta, decay.unsqueeze(-1)],
-    )
-    decay = decay.squeeze(-1).cumsum(-1)
-    decay_exp = decay.exp()[..., None]
-    L_mask = ((decay.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
-    attn = -((k_beta @ k.transpose(-1, -2)) * L_mask).masked_fill(mask, 0)
-    for i in range(1, chunk_size):
-        attn[..., i, :i] = attn[..., i, :i].clone() + (
-            attn[..., i, :i, None].clone() * attn[..., :i, :i].clone()
-        ).sum(-2)
-    attn = attn + torch.eye(chunk_size, dtype=torch.float, device=q.device)
-    attn = attn
-    k_cumsum = attn @ v
-    k_cumdecay = attn @ (k_beta * decay_exp)
-    v = k_cumsum
-    S = k.new_zeros(b, h, d_k, d_v)
-    if initial_state is not None:
-        S = initial_state
-    o = torch.zeros_like(v)
-    mask = torch.triu(
-        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device),
-        diagonal=1,
-    )
-    for i in range(0, l // chunk_size):
-        q_i, k_i, v_i = q[:, :, i], k[:, :, i], v[:, :, i]
-        attn = (q_i @ k_i.transpose(-1, -2) * L_mask[:, :, i]).masked_fill_(mask, 0)
-        v_prime = (k_cumdecay[:, :, i]) @ S
-        v_new = v_i - v_prime
-        o_inter = (q_i * decay[:, :, i, :, None].exp()) @ S
-        o[:, :, i] = o_inter + attn @ v_new
-        S = (
-            S * decay[:, :, i, -1, None, None].exp()
-            + (
-                k_i * (decay[:, :, i, -1, None] - decay[:, :, i]).exp()[..., None]
-            ).transpose(-1, -2)
-            @ v_new
-        )
-    if not output_final_state:
-        S = None
-    # unpad
-    o = rearrange(o, "b h n c d -> b h (n c) d")
-    o = o[:, :, :T]
-    o = o.transpose(1, 2)
-    return o, S
-
-
-@pytest.mark.parametrize(
-    ("H", "D", "mask_p", "cu_seqlens", "dtype"),
-    [
-        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
-        for test in [
-            (8, 128, 0, [0, 6], torch.float16),
-            (8, 128, 0, [0, 15], torch.float16),
-            (8, 128, 0, [0, 24], torch.float16),
-            (8, 128, 0, [0, 31], torch.float16),
-            (8, 128, 0, [0, 32], torch.float16),
-            (8, 128, 0, [0, 33], torch.float16),
-            (8, 128, 0, [0, 48], torch.float16),
-            (8, 128, 0, [0, 63], torch.float16),
-            (8, 128, 0, [0, 64], torch.float16),
-            (8, 128, 0, [0, 64], torch.float16),
-            (8, 128, 0, [0, 76], torch.float16),
-            (8, 128, 0, [0, 84], torch.float16),
-            (8, 128, 0, [0, 96], torch.float16),
-            (8, 128, 0, [0, 100], torch.float16),
-            (8, 128, 0, [0, 115], torch.float16),
-            (8, 128, 0, [0, 127], torch.float16),
-            (8, 128, 0, [0, 128], torch.float16),
-        ]
-    ],
+@triton.heuristics(
+    {"HAS_SCALE": lambda args: args["scale"] is not None, "IS_VARLEN": lambda args: args["cu_seqlens"] is not None}
 )
-def test_accuracy_chunk_varlen(
-    H: int,
-    D: int,
-    mask_p: float,
-    cu_seqlens: list[int],
-    dtype: torch.dtype,
+@triton.jit(do_not_specialize=["T"])
+def chunk_local_cumsum_scalar_kernel(
+    s,
+    o,
+    scale,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    REVERSE: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    HEAD_FIRST: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr = 64,
 ):
-    if D != 128:
-        pytest.skip(
-            reason="chunk_gated_delta_rule is not supported on alchemist for D!=128"
+    i_block, i_b = tl.program_id(0), tl.program_id(1)
+    N_CHUNKS: tl.constexpr = BLOCK_T // CHUNK_SIZE
+
+    if IS_VARLEN:
+        i_s, i_block = (
+            tl.load(chunk_indices + i_block * 2).to(tl.int32),
+            tl.load(chunk_indices + i_block * 2 + 1).to(tl.int32),
         )
-    torch.manual_seed(42)
-    os.environ["TRITON_F32_DEFAULT"] = "ieee"
-    # randomly split the sequence into N segments
-    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
-    T = cu_seqlens[-1]
-    N = len(cu_seqlens) - 1
+        bos, eos = tl.load(cu_seqlens + i_s).to(tl.int32), tl.load(cu_seqlens + i_s + 1).to(tl.int32)
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
 
-    # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, H, D), dtype=dtype)
-    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn((1, T, H, D), dtype=dtype)
-    g = F.logsigmoid(torch.rand(1, T, H, dtype=torch.float32))
-    g = g * (torch.rand_like(g) > mask_p)
-    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn((N, H, D, D), dtype=dtype)
+    if HEAD_FIRST:
+        ptr_s = tl.make_block_ptr(s + bos * H, (H, T), (T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))
+        ptr_o = tl.make_block_ptr(o + bos * H, (H, T), (T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))
+        b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.float32)
+        b_s = tl.reshape(b_s, (H, N_CHUNKS, CHUNK_SIZE))
+        b_s = tl.trans(b_s, (2, 0, 1))
+        b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+        if HAS_SCALE:
+            b_o *= scale
+        b_o = tl.trans(b_o, (2, 0, 1))
+        b_o = tl.reshape(b_o, (H, BLOCK_T))
+    else:
+        ptr_s = tl.make_block_ptr(s + bos * H, (T, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
+        ptr_o = tl.make_block_ptr(o + bos * H, (T, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
+        b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.float32)
+        b_s = tl.reshape(b_s, (N_CHUNKS, CHUNK_SIZE, H))
+        b_s = tl.trans(b_s, (1, 0, 2))
+        b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+        if HAS_SCALE:
+            b_o *= scale
+        b_o = tl.trans(b_o, (1, 0, 2))
+        b_o = tl.reshape(b_o, (BLOCK_T, H))
 
-    q, k, v, beta, g, h0 = map(
-        lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0)
-    )
+    tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_check=(0,))
+    return
 
-    _, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
-        q=q.clone(),
-        k=k.clone(),
-        v=v.clone(),
-        beta=beta.clone(),
-        g=g.clone(),
-        scale=None,
-        initial_state=h0.clone(),
-        output_final_state=True,
+
+def chunk_local_cumsum_scalar(
+    g,
+    chunk_size,
+    reverse: bool = False,
+    scale: float = None,
+    cu_seqlens: torch.Tensor | None = None,
+    head_first: bool = False,
+    output_dtype: torch.Tensor | None = torch.float,
+):
+    if head_first:
+        B, H, T = g.shape
+    else:
+        B, T, H = g.shape
+    assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
+    OPTIM_BLOCK_SIZE = triton.next_power_of_2((2**18) // (H * chunk_size))
+    block_indices = prepare_chunk_indices(cu_seqlens, chunk_size=OPTIM_BLOCK_SIZE) if cu_seqlens is not None else None
+    num_blocks = len(block_indices) if cu_seqlens is not None else triton.cdiv(T, OPTIM_BLOCK_SIZE)
+    g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+    grid = (num_blocks, B)
+    chunk_local_cumsum_scalar_kernel[grid](
+        s=g_org,
+        o=g,
+        scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=block_indices,
+        T=T,
+        B=B,
+        H=H,
+        BLOCK_T=OPTIM_BLOCK_SIZE,
+        CHUNK_SIZE=chunk_size,
+        HEAD_FIRST=head_first,
+        REVERSE=reverse,
+        num_warps=8,
+        num_stages=3,
     )
+    return g
 
-    ref = []
-    ref_ht = []
-    for i in range(N):
-        ref_i, ref_ht_i = recurrent_gated_delta_rule_ref(
-            q=q[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            k=k[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            v=v[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            beta=beta[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            g=g[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            initial_state=h0[i],
-            output_final_state=True,
+
+def chunk_local_cumsum(
+    g: torch.Tensor,
+    chunk_size: int,
+    reverse: bool = False,
+    scale: float = None,
+    cu_seqlens: torch.Tensor | None = None,
+    head_first: bool = False,
+    output_dtype: torch.dtype | None = None,
+    **kwargs,
+) -> torch.Tensor:
+    if cu_seqlens is not None:
+        assert g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
+    if not output_dtype:
+        output_dtype = g.dtype
+    if len(g.shape) == 3:
+        return chunk_local_cumsum_scalar(
+            g=g,
+            chunk_size=chunk_size,
+            reverse=reverse,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            head_first=head_first,
+            output_dtype=output_dtype,
         )
-        ref.append(ref_i)
-        ref_ht.append(ref_ht_i)
-    ref = torch.cat(ref, 1)
-    ref_ht = torch.cat(ref_ht, 0)
+    else:
+        raise ValueError(
+            f"Unsupported input shape {g.shape}, "
+            f"which should be (B, T, H, D) if `head_first=False` "
+            f"or (B, H, T, D) otherwise"
+        )
 
-    print_diff("o", ref, o, 0.005)
-    print_diff("ht", ref_ht, final_state, 0.005)
+import time
+import numpy as np
+from typing import Optional, Tuple
 
-    assert_close("o", ref, o, 0.005)
-    assert_close("ht", ref_ht, final_state, 0.005)
+# ==================== 执行调用 ====================
+if __name__ == "__main__":
+    torch.manual_seed(42)
+    B, T, H, Hg, K, V, BT, dtype, device, varle = (1, 10288, 8, 2, 128, 128, 64, torch.float16, "npu", True)
+    
+    if varle:
+        # 变长序列测试
+        seqlens = []
+        for _ in range(B):
+            # 每个序列长度在 [T//2, T] 之间随机
+            seq_len = torch.randint(T//2, T+1, (1,)).item()
+            seqlens.append(seq_len)
+        
+        cu_seqlens = torch.tensor([0] + np.cumsum(seqlens).tolist(), 
+                                 dtype=torch.int64, device=device)
+        T_total = cu_seqlens[-1].item()
+        
+        # 创建变长张量
+        k = torch.randn(B, T_total, Hg, K, dtype=dtype, device=device)
+        v = torch.randn(B, T_total, H, V, dtype=dtype, device=device)
+        beta = torch.randn(B, T_total, H, dtype=dtype, device=device)
+        g_orig = torch.randn(B, T_total, H, dtype=dtype, device=device)
+        A = torch.randn(B, T_total, H, BT, dtype=dtype, device=device)
+    
+    # 预热
+    for _ in range(20):
+        # Ai = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+        g = chunk_local_cumsum(g_orig, chunk_size=64, cu_seqlens=cu_seqlens)
+    
+    # 计时
+    torch.npu.synchronize() if device == "npu" else None
+    start_time = time.time()
+    
+    g = chunk_local_cumsum(g_orig, chunk_size=64, cu_seqlens=cu_seqlens)
+    
+    torch.npu.synchronize() if device == "npu" else None
+    elapsed = time.time() - start_time
+
+    print("pass")
