@@ -349,6 +349,7 @@ def solve_tril(
         (I + A)^-1 with the same shape as A
     """
     assert A.shape[-1] in [16, 32, 64]
+
     B, T, H, BT = A.shape
     Ad = torch.empty(B, T, H, 16, device=A.device, dtype=torch.float if BT != 16 else output_dtype)
 
