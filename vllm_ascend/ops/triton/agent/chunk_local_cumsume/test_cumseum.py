@@ -12,7 +12,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices
+from .utils import prepare_chunk_indices
 
 
 @triton.heuristics(
@@ -26,7 +26,6 @@ def chunk_local_cumsum_scalar_kernel(
     cu_seqlens,
     chunk_indices,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     BLOCK_T: tl.constexpr,
     REVERSE: tl.constexpr,
@@ -101,7 +100,6 @@ def chunk_local_cumsum_scalar(
         cu_seqlens=cu_seqlens,
         chunk_indices=block_indices,
         T=T,
-        B=B,
         H=H,
         BLOCK_T=OPTIM_BLOCK_SIZE,
         CHUNK_SIZE=chunk_size,
@@ -120,13 +118,11 @@ def chunk_local_cumsum(
     scale: float = None,
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: torch.dtype | None = None,
+    output_dtype: torch.dtype | None = torch.float,
     **kwargs,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
-    if not output_dtype:
-        output_dtype = g.dtype
     if len(g.shape) == 3:
         return chunk_local_cumsum_scalar(
             g=g,
