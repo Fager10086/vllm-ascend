@@ -173,6 +173,8 @@ if __name__ == "__main__":
     H = 2
     D = 128
     dtype = torch.bfloat16
+    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+    init_device_properties_triton()
     
     # # 2. 生成输入张量
     q = torch.randn((1, T, H, D), device=device, dtype=dtype)
