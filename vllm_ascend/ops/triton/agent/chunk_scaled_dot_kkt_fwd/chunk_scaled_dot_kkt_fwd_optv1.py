@@ -21,11 +21,11 @@ from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices, safe_exp
         "USE_G": lambda args: args["g_cumsum"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["T", "B"])
+@triton.jit(do_not_specialize=["T"])
 def chunk_scaled_dot_kkt_fwd_kernel(
     k,
-    beta,  # [H, B, T]
-    g_cumsum,  # [H, B, T]
+    beta,
+    g_cumsum,
     A,
     cu_seqlens,
     chunk_indices,
@@ -39,45 +39,84 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
 ):
+    HPG: tl.constexpr = H // Hg
+
     bt_stride = B * T
-    i_t_i, _ = tl.program_id(0), tl.program_id(1)
+    i_t_i = tl.program_id(0)
+    o_t = tl.arange(0, BT)
+    o_t_fp32 = o_t.to(tl.float32)
 
-    for i_bh in range(B * H):
-        i_b, i_h = i_bh // H, i_bh % H
-        if IS_VARLEN:
-            i_n, i_t = (
-                tl.load(chunk_indices + i_t_i * 2).to(tl.int32),
-                tl.load(chunk_indices + i_t_i * 2 + 1).to(tl.int32),
-            )
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-            T = eos - bos
-        else:
-            bos, eos = i_b * T, i_b * T + T
+    lower_tri_float = (o_t_fp32[:, None] > o_t_fp32[None, :]).to(tl.float32)
+
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_t_i * 2).to(tl.int32)
+        i_t = tl.load(chunk_indices + i_t_i * 2 + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+
+    for i_b in range(B):
+        if not IS_VARLEN:
+            bos = i_b * T
             i_t = i_t_i
-        o_t = tl.arange(0, BT)
-        o_t_fp32 = o_t.to(tl.float32)
 
-        p_beta = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
-        b_beta = tl.load(p_beta, boundary_check=(0,))
-
-        b_A = tl.zeros([BT, BT], dtype=tl.float32)
-        for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(
-                k + (bos * Hg + i_h // (H // Hg)) * K, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
-            )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_A += tl.dot(b_k, tl.trans(b_k))
-
-        if USE_G:
-            p_g = tl.make_block_ptr(g_cumsum + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
-            b_g = tl.load(p_g, boundary_check=(0,))
-            b_g_diff = b_g[:, None] - b_g[None, :]
-            b_A *= safe_exp(b_g_diff)
-
-        b_A *= b_beta[:, None]
-        b_A = tl.where(o_t_fp32[:, None] > o_t_fp32[None, :], b_A, 0)
-        p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+        if Hg == 2:
+            p_k0 = tl.make_block_ptr(k + (bos * Hg + 0) * K, (T, K), (Hg * K, 1), (i_t * BT, 0), (BT, K), (1, 0))
+            b_k0 = tl.load(p_k0, boundary_check=(0, 1))
+            p_k1 = tl.make_block_ptr(k + (bos * Hg + 1) * K, (T, K), (Hg * K, 1), (i_t * BT, 0), (BT, K), (1, 0))
+            b_k1 = tl.load(p_k1, boundary_check=(0, 1))
+            b_base_A0 = tl.dot(b_k0, tl.trans(b_k0))
+            b_base_A1 = tl.dot(b_k1, tl.trans(b_k1))
+            b_lower0 = b_base_A0 * lower_tri_float
+            for i_h_local in range(HPG):
+                i_h = 0 * HPG + i_h_local
+                p_beta = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
+                b_beta = tl.load(p_beta, boundary_check=(0,))
+                if USE_G:
+                    p_g = tl.make_block_ptr(g_cumsum + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
+                    b_g = tl.load(p_g, boundary_check=(0,))
+                    exp_pos = tl.exp(b_g.to(tl.float32))
+                    exp_neg = 1.0 / exp_pos
+                    b_A = b_lower0 * ((b_beta.to(tl.float32) * exp_pos)[:, None] * exp_neg[None, :])
+                else:
+                    b_A = b_lower0 * b_beta[:, None]
+                p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+                tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+            b_lower1 = b_base_A1 * lower_tri_float
+            for i_h_local in range(HPG):
+                i_h = 1 * HPG + i_h_local
+                p_beta = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
+                b_beta = tl.load(p_beta, boundary_check=(0,))
+                if USE_G:
+                    p_g = tl.make_block_ptr(g_cumsum + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
+                    b_g = tl.load(p_g, boundary_check=(0,))
+                    exp_pos = tl.exp(b_g.to(tl.float32))
+                    exp_neg = 1.0 / exp_pos
+                    b_A = b_lower1 * ((b_beta.to(tl.float32) * exp_pos)[:, None] * exp_neg[None, :])
+                else:
+                    b_A = b_lower1 * b_beta[:, None]
+                p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+                tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+        else:
+            for i_kg in range(Hg):
+                p_k = tl.make_block_ptr(k + (bos * Hg + i_kg) * K, (T, K), (Hg * K, 1), (i_t * BT, 0), (BT, K), (1, 0))
+                b_k = tl.load(p_k, boundary_check=(0, 1))
+                b_base_A = tl.dot(b_k, tl.trans(b_k))
+                b_base_A_lower = b_base_A * lower_tri_float
+                for i_h_local in range(HPG):
+                    i_h = i_kg * HPG + i_h_local
+                    p_beta = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
+                    b_beta = tl.load(p_beta, boundary_check=(0,))
+                    if USE_G:
+                        p_g = tl.make_block_ptr(g_cumsum + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
+                        b_g = tl.load(p_g, boundary_check=(0,))
+                        exp_pos = tl.exp(b_g.to(tl.float32))
+                        exp_neg = 1.0 / exp_pos
+                        b_A = b_base_A_lower * ((b_beta.to(tl.float32) * exp_pos)[:, None] * exp_neg[None, :])
+                    else:
+                        b_A = b_base_A_lower * b_beta[:, None]
+                    p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+                    tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
 def chunk_scaled_dot_kkt_fwd(
@@ -156,10 +195,8 @@ if __name__ == "__main__":
     B, T, H, Hg, K, V, BT, dtype, device, varle = (1, 10288, 8, 2, 128, 128, 64, torch.float16, "npu", True)
     
     if varle:
-        # 变长序列测试
         seqlens = []
         for _ in range(B):
-            # 每个序列长度在 [T//2, T] 之间随机
             seq_len = torch.randint(T//2, T+1, (1,)).item()
             seqlens.append(seq_len)
         
@@ -167,18 +204,15 @@ if __name__ == "__main__":
                                  dtype=torch.int64, device=device)
         T_total = cu_seqlens[-1].item()
         
-        # 创建变长张量
         k = torch.randn(B, T_total, Hg, K, dtype=dtype, device=device)
         v = torch.randn(B, T_total, H, V, dtype=dtype, device=device)
         beta = torch.randn(B, T_total, H, dtype=dtype, device=device)
         g_cumsum = torch.randn(B, T_total, H, dtype=dtype, device=device)
         A = torch.randn(B, T_total, H, BT, dtype=dtype, device=device)
     
-    # 预热
     for _ in range(20):
         A = chunk_scaled_dot_kkt_fwd(k=k, beta=beta, g_cumsum=g_cumsum, cu_seqlens=cu_seqlens, output_dtype=torch.float32)
     
-    # 计时
     torch.npu.synchronize() if device == "npu" else None
     start_time = time.time()
     
