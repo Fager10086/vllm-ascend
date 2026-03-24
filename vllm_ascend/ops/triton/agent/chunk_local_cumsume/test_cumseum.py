@@ -12,7 +12,10 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from .utils import prepare_chunk_indices
+try:
+    from .utils import prepare_chunk_indices
+except ImportError:
+    from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices
 
 
 @triton.heuristics(
@@ -70,7 +73,7 @@ def chunk_local_cumsum_scalar_kernel(
         b_o = tl.trans(b_o, (1, 0, 2))
         b_o = tl.reshape(b_o, (BLOCK_T, H))
 
-    tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_check=(0,))
+    tl.store(ptr_o, b_o.to(o.dtype.element_ty), boundary_check=(0,))
     return
 
 
@@ -146,6 +149,8 @@ from typing import Optional, Tuple
 
 # ==================== 执行调用 ====================
 if __name__ == "__main__":
+    import sys as _sys
+    _sys.path.insert(0, '/vllm-workspace/vllm-ascend')
     torch.manual_seed(42)
     B, T, H, Hg, K, V, BT, dtype, device, varle = (1, 10288, 8, 2, 128, 128, 64, torch.float16, "npu", True)
     
