@@ -162,89 +162,59 @@ def chunk_fwd_o(
     )
     return o
 
-# ==================== 执行调用 ====================
 if __name__ == "__main__":
     torch.manual_seed(42)
     device = "npu"
-    dtype = torch.float16  # Triton对FP16/FP32支持最好
+    dtype = torch.float16  
 
-    # 基础维度配置 (可根据需要调整)
-    T = 10288
+    T = 10012
     H = 2
     D = 128
     dtype = torch.bfloat16
     from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+    import time
     init_device_properties_triton()
     
-    # # 2. 生成输入张量
     q = torch.randn((1, T, H, D), device=device, dtype=dtype)
-    # k = F.normalize(torch.randn(1, T, H, D, dtype=dtype, device=device), p=2, dim=-1).to(dtype)
     k = torch.randn(1, T, H, D, device=device, dtype=dtype)
     v = torch.randn((1, T, 8, D), device=device, dtype=dtype)
-    # u = torch.empty_like(v)
     B, T, Hg, K, V = *k.shape, v.shape[-1]
     chunk_size = 64
     BT = chunk_size
     NT = triton.cdiv(T, BT)
-    # print("************************************************************", B, NT, H, K, V)
     h = k.new_empty(B, NT, 8, K, V)
     g = torch.randn((1, T, 8), device=device, dtype=torch.float32)
     scale = k.shape[-1] ** -0.5
-    cu_seqlens:list[int] = [0, 10288]
+    cu_seqlens:list[int] = [0, T]
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
 
-    chunk_fwd_o(
-        q=q,
-        k=k,
-        v=v,
-        h=h,
-        g=g,
-        scale=scale,
-        # cu_seqlens=None,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
-    )
+    for _ in range(20):
+        chunk_fwd_o(
+            q=q,
+            k=k,
+            v=v,
+            h=h,
+            g=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size
+        )
 
-    print("pass")
-
-# 调用示例
-# if __name__ == "__main__":
-#     # 设置随机种子
-#     torch.manual_seed(42)
-
-#     # 设备选择
-#     device = torch.device("cuda" if torch.cuda.is_available() else "npu")
-
-#     # 参数配置
-#     B = 1          # batch size
-#     T = 10288        # 序列长度（等长情况）
-#     Hg = 2         # query/key 的 head 数
-#     H = 16         # value 的 head 数（通常 H = Hg * group_size，这里随意）
-#     K = 128        # head 维度
-#     V = 64         # value 维度
-#     BT = 64        # chunk 大小
-
-#     # 生成随机输入
-#     q = torch.randn(B, T, Hg, K, device=device, dtype=torch.float16)
-#     k = torch.randn(B, T, Hg, K, device=device, dtype=torch.float16)
-#     v = torch.randn(B, T, H, V, device=device, dtype=torch.float16)
-
-#     # 计算 h 的形状：总 chunk 数 * H * K * V
-#     # 等长情况下，每个序列的 chunk 数为 NT = ceil(T/BT)，总 chunk 数为 B * NT
-#     NT = (T + BT - 1) // BT
-#     h_shape = (B , NT, H, K, V)
-#     # h = torch.randn(h_shape, device=device, dtype=torch.float16)
-#     h = torch.empty(h_shape, device=device, dtype=torch.float16)
-
-#     # 可选 g (shape: B, T, H)
-#     g = torch.randn(B, T, H, device=device, dtype=torch.float16)
-#     # g = torch.empty(B, T, H, device=device, dtype=torch.float16)
-
-#     scale = k.shape[-1] ** -0.5
-#     cu_seqlens:list[int] = [0, 128]
-#     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
-#     # 等长情况调用
-#     o = chunk_fwd_o(q, k, v, h, g=g, scale=scale,
-#          cu_seqlens=cu_seqlens, chunk_size=BT)
-
-#     print("Script completed.")
+    torch.npu.synchronize() if device == "npu" else None
+    start_time = time.time()
+    
+    for _ in range(20):
+        chunk_fwd_o(
+            q=q,
+            k=k,
+            v=v,
+            h=h,
+            g=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size
+        )
+  
+    torch.npu.synchronize() if device == "npu" else None
+    elapsed = (time.time() - start_time) / 20
+    print(f"Task Duration: {elapsed*1000:.2f}ms")
