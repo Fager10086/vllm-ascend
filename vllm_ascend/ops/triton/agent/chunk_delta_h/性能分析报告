@@ -1,0 +1,2184 @@
+# Triton算子chunk_delta_h性能瓶颈分析
+
+**Session ID:** ses_2d17f03f1ffe7QSl3Hdmp6AE5V
+**Created:** 3/27/2026, 8:54:58 AM
+**Updated:** 3/27/2026, 9:00:35 AM
+
+---
+
+## User
+
+[search-mode]
+MAXIMIZE SEARCH EFFORT. Launch multiple background agents IN PARALLEL:
+- explore agents (codebase patterns, file structures, ast-grep)
+- librarian agents (remote repos, official docs, GitHub examples)
+Plus direct tools: Grep, ripgrep (rg), ast-grep (sg)
+NEVER stop at first result - be exhaustive.
+
+[analyze-mode]
+ANALYSIS MODE. Gather context before diving deep:
+
+CONTEXT GATHERING (parallel):
+- 1-2 explore agents (codebase patterns, implementations)
+- 1-2 librarian agents (if external library involved)
+- Direct tools: Grep, AST-grep, LSP for targeted searches
+
+IF COMPLEX - DO NOT STRUGGLE ALONE. Consult specialists:
+- **Oracle**: Conventional problems (architecture, debugging, complex logic)
+- **Artistry**: Non-conventional problems (different approach needed)
+
+SYNTHESIZE findings before proceeding.
+
+---
+
+<command-instruction>
+You are starting a Ralph Loop - a self-referential development loop that runs until task completion.
+
+## How Ralph Loop Works
+
+1. You will work on the task continuously
+2. When you believe the task is FULLY complete, output: `<promise>{{COMPLETION_PROMISE}}</promise>`
+3. If you don't output the promise, the loop will automatically inject another prompt to continue
+4. Maximum iterations: Configurable (default 100)
+
+## Rules
+
+- Focus on completing the task fully, not partially
+- Don't output the completion promise until the task is truly done
+- Each iteration should make meaningful progress toward the goal
+- If stuck, try different approaches
+- Use todos to track your progress
+
+## Exit Conditions
+
+1. **Completion**: Output your completion promise tag when fully complete
+2. **Max Iterations**: Loop stops automatically at limit
+3. **Cancel**: User runs `/cancel-ralph` command
+
+## Your Task
+
+Parse the arguments below and begin working on the task. The format is:
+`"task description" [--completion-promise=TEXT] [--max-iterations=N] [--strategy=reset|continue]`
+
+Default completion promise is "DONE" and default max iterations is 100.
+</command-instruction>
+
+<user-task>
+使用 Skill /triton-ascend-ops-optimizer 分析 Triton 算子代码存在的性能问题：/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/chunk_delta_h.py。性能测试用 ASCEND_RT_VISIBLE_DEVICES="4" python3 /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/benchmark_delta_h.py。--max-iterations 25 --completion-promise "分析出算子性能瓶颈" 
+</user-task>
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 7.3s)
+
+_Thinking:_
+
+The user wants me to analyze Triton operator code performance issues using the triton-ascend-ops-optimizer skill. Let me first load the skill, then analyze the code.
+
+Let me start by loading the skill and reading the target file.
+
+**Tool: skill**
+
+**Input:**
+```json
+{
+  "name": "triton-ascend-ops-optimizer"
+}
+```
+
+**Output:**
+```
+## Skill: triton-ascend-ops-optimizer
+
+**Base directory**: /root/.config/opencode/skills/triton-ascend-ops-optimizer
+
+Base directory for this skill: /root/.config/opencode/skills/triton-ascend-ops-optimizer/
+File references (@path) in this skill are relative to this directory.
+
+# Triton 算子性能优化
+
+## 目标与概述
+
+确保在**昇腾（Ascend）NPU** 上，可靠地实现对 Triton 算子的深度性能优化目标。Grid 大小禁止与输入数据的形状相关联，**必须使用固定大小**，确保泛化性。
+
+**优化工作应聚焦于 Triton 算子 Kernel 本身的性能优化**，禁止通过取巧方式或针对测试用例或测试代码逻辑进行 `Hacking` 来实现性能提升。同时，禁止修改测试用例；禁止以降低算子变量的数据精度为手段进行性能优化；禁止通过字典、缓存（cache）或任何形式的存储机制记录历史输入与输出，以避免利用相同输入复用结果来提升性能。
+
+**核心目标**：将指定的 Triton 算子性能提升至少 **x 倍**（用户要求的性能提升），在满足要求的基础上，性能越高越好，追求极致性能。
+
+**工作模式**：单算子优化模式。禁止以降低算子变量的数据精度为手段进行性能优化；禁止通过字典、缓存（cache）或任何形式的存储机制记录历史输入与输出，以避免利用相同输入复用结果来提升性能；**禁止使用入图方式**来提升性能（模型侧会通过整网入图或 Piecewise 方式进行图优化，这里只关注单算子的独立优化）。
+
+**工作原则**：
+- **正确性优先**：每次修改后都必须进行正确性验证和性能测量，注意：精度与功能正确性验证全部通过后，才能进行性能测量。
+- **目标导向**：性能提升未达到目标前，持续优化，不停止迭代。
+- **迭代优化**：可以反复修改、测试、迭代，直至达成目标。在调测过程中，第一次修改算子源代码时务必备份，之后还要注意保存有性能提升的代码版本，以便需要时恢复；准确记录每次修改算子代码后的性能测试结果，并概括相应的修改要点，以便从经验中提升。
+- **精准修改**：追求“手术级”的精准修改，避免引入新问题。
+
+## 工作流程
+
+0. 在昇腾 NPU 环境中，执行以下命令完成**环境配置**：`export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH && source /usr/local/Ascend/ascend-toolkit/set_env.sh`
+
+1. **基线性能验证**：首先，深入分析算子的输入参数、数据类型、Shape 范围、功能逻辑、计算流程及输出结果；然后，运行精度与功能正确性验证，验证算子的正确性和精度；最后，执行性能测试，输出中的 Task Duration: 即为当前算子的耗时，将其记录为基线性能数据。注意：精度与功能正确性验证，以及性能测试所用的**脚本和运行命令**，**严格按照用户提供的执行**；如果用户未提供，必须主动提示用户输入。每次运行新的测试之前，必须预先清除缓存，且只能使用如下命令清除指定内容：
+```bash
+rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/
+```
+
+2. **深度性能优化**：根据基线分析结果，对 `<op_name>.py` 算子进行针对性优化，确保性能提升至少 **x 倍**（用户要求的性能提升），在满足要求的基础上，性能越高越好，追求极致性能。每次对算子源码进行完整修改后，需按顺序依次执行以下测试：
+    - 精度与功能正确性验证。注意：精度与功能正确性验证全部通过后，才能进行性能测量；如果没通过，继续修改优化。
+    - 性能测试（与基线对比）
+
+3. **迭代调优过程中按需参考的文档**：`references/hardware_constraints.md`、`references/troubleshooting.md`
+
+## 性能优化参考
+
+1 - 必须遵循的 Grid 大小的计算方式
+
+**关键优化点**：Grid 大小禁止与输入数据的形状相关联，**必须使用固定大小**：对于纯 Vector 算子，只能使用 **grid = (get_vectorcore_num(), )**，禁止 min、max 操作；而对于 Kernel 内包含 `tl.dot` 的 Triton 算子，只能使用 **grid = (get_vectorcore_num() // 2, )**，禁止 min、max 操作。**示意如下**：
+```python
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+# must first be imported and initialized: 
+init_device_properties_triton()
+print(f"NPU Vector 核心数: {get_vectorcore_num()}")
+
+# pure vector operator
+grid = (get_vectorcore_num(), )
+vector_kernel[grid]()
+
+# cube operator: has tl.dot
+grid = (get_vectorcore_num() // 2, )
+cube_kernel[grid]()
+```
+
+优先使用 **1D Grid**；适配 NPU 的 2D Grid 写法也会合并为 1D。
+
+2 - Ascend NPU 在架构上访存能力相对较弱，而计算能力较强，因此在设计时需要尽可能减少频繁的内存访问。**关键优化点是 Kernel 内批量处理多个 Tokens**，必须优先思考和调试，从而避免因逐个加载而产生的大量访存开销；由于受限于硬件内存容量，无法一次性处理完整的序列，仍需采用**分批次**计算。
+
+一次循环里能处理的**最大 Token 数 N**，由 Kernel 内 **UB 可用容量**决定。**设：**
+- 单 Kernel 内 UB 总容量为 **192 KB**
+- 为留安全余量，仅使用 170 KB 的 **50%**（为确保启用 Double Buffering），即 **85 KB**
+- 单个 Token 在 Kernel 内同时占用的 UB 空间峰值为 $S_{\text{token}}$（包含所有 load、中间变量的内存占用）
+
+则需满足：$N \times S_{\text{token}} \le 85 \times 1024$；因此：$N \le \frac{85 \times 1024}{S_{\text{token}}}$
+**示例：** 若 Kernel 只做一次 load 和一次 store，加载形状为 `(batch_size, hidden_size)` 的 **BF16** Tensor（每元素 2 Bytes），且不引入其他中间变量，则单个 Token 的 UB 占用峰值为：
+$$
+S_{\text{token}} = \text{hidden\_size} \times 2
+$$
+
+代入约束：
+$$
+N \times \text{hidden\_size} \times 2 \le 85 \times 1024
+$$
+据此计算优化后的循环次数 `reduced_loops` 以及单次循环可处理的**最大 Token 数 N**。单次循环应尽可能占满 UB，但需控制在 UB 大小的约一半以内，以利用 `Double Buffering` 机制实现流水并行。计算最大处理量时应使用**整数除法**（//）而非 `tl.cdiv`，否则易引发 UB 溢出问题。
+
+3 - 在昇腾（Ascend）NPU 上使用 Triton 进行算子性能优化时，必须避免在算子调用过程中触发重编译。Triton 的单次编译耗时在秒级，重编译会显著影响计算性能。**通过以下方式避免重编译**：
+
+在 Kernel 函数定义前，对于会变化的标量参数，可使用 `@triton.jit(do_not_specialize=["T", "B",  ...])` 进行装饰，其中 `T`、`B` 为变量名。这是因为底层编译器会自动对这样的变量做特定优化；在 Kernel 函数定义中，声明为 `constexpr` 的常量必须保持值不变，不应作为可变值使用；反之，可变值也不应声明为 `constexpr` 类型。因为一旦常量值发生变化，Triton 便会触发重编译。
+
+4 - 掩码（mask）与尾块处理：每次核函数加载和存储 tensor 时都需使用 `mask` 来处理不需要计算的尾块。经过 mask 处理后，每个核上的 tensor 形状保持一致。
+
+5 - 减少 kernel 内 Scalar 运算：将与 pid 或循环变量无关的计算移至辅助函数或循环外部；能合并的计算尽量合并，减少冗余操作。
+
+6 - 对于 `index_select` 这类涉及非连续地址访问的操作，只能通过循环逐行读取数据；否则会引入大量标量（Scalar）计算（计算二维 mask），严重影响性能。
+
+7 - 加载与计算交织：当需要多次从同一全局内存地址加载数据并进行计算（如加法）时，需采用 “加载一次、计算一次” 的方式，而不是全部加载完再统一计算。后者会导致计算流水线等待所有 tensor 加载完成，效率较低；前者可有效隐藏访存延迟。
+
+8 - 若存在多个写入流，建议边计算边写入数据。写入流通常不会相互冲突，计算完提前写入可以增大并行的可能，提升整体性能。
+
+9 - 使用 `tl.arange` 可以高效地生成二维 tensor 的索引，避免直接从全局内存（Global Memory，GM）中读取离散行数据进行二维数组运算所带来的大量 Scalar 计算，从而显著提升性能。
+
+10 - 尽量避免使用 `tl.where`，因其主要适用于离散数据处理，性能较差。
+
+11 - 避免对同一 tensor 多次调用 `insert_slice`，以提升执行效率。
+
+12 - 执行规约操作时，优先选择最大的维度进行规约，有助于提升性能。
+
+13 - **kernel 入参**：对于同一模型调用期间保持不变的参数，推荐声明为 `tl.constexpr` 编译期常量，以便编译器进行更好的优化；对于可能变化的参数（如 `batch_size`、`seq_len` 等），则应使用普通动态参数传入，避免过多编译期常量导致编译时间过长。
+
+14 - 禁止将 Kernel 每次加载的数据大小固定（如 [128, 128] 固定数据大小），应该根据每次输入数据的大小动态计算，以提升对输入的泛化性，避免出现当输入数据大小发生变化时，grid 和 Kernel 下发次数变多导致的性能问题。
+
+## 需遵循的规则和约束
+
+### 单算子模式
+
+单个算子只关注单算子模式下的基础功能和性能，**禁止使用入图方式提升性能**，因为模型侧会以整网入图或分段（Piecewise）方式对多算子进行图优化。
+
+### tl.load 与 mask 使用要求
+
+- 尽量合并相同 load、计算和 store 操作。例如，利用 `tl.load` 与 mask 参数，可一次性加载多个 Tokens 的数据，避免多次独立的 load。减少此类冗余操作有助于提升性能。
+- 避免在 `tl.load` 中使用 other 参数，因为其内部会触发 `tl.where`，导致 load 后无法与其他 load 并行。
+- 推荐的替代方案：先执行无掩码的 `tl.load`，再通过 `tl.where` 与 mask 组合实现掩码逻辑；当访问内存规则连续时，用 `tl.insert_slice` 代替。
+
+### 分支与编译约束
+
+在 kernel 内部的 `if-else` 分支中，同名变量的 Shape 必须一致，否则会导致编译错误。
+
+### 数据搬运注意事项
+
+- 保证 tl.load 加载的是连续的多行数据；若数据分布离散，需逐行加载。
+- 传递给 Triton 算子的 tensor 必须是内存连续的，必要时可通过 `.contiguous()` 方法确保。
+- 避免复用 `tl.load` 和 `tl.store` 的变量名，使用不同变量名可提高代码可读性，并减少数据流错误的风险。
+
+## 执行要求
+
+在 Ascend NPU 算子优化中，需自主完成从代码修改（追求“手术级”精准）、测试验证到性能对比的全流程闭环，确保性能提升达到用户要求的 **x 倍** 以上。通过迭代优化，在不引入错误的前提下，持续改进直至达标。
+
+## 结果报告
+
+性能优化目标真正达成后，需准确输出标准化报告：
+```
+## 优化结果报告
+
+### 算子信息
+
+- 算子名称：<op_name>
+- 源文件：<file_path>
+
+### 性能对比
+
+| 基线耗时 (us) | 优化后耗时 (us) | 加速比 |
+|-------------|---------------|-------|
+| ... | ... | ...x |
+
+### 优化技术清单
+
+1. [已应用] 多个 Token 并行处理：N = ...
+2. [已应用] 消除带 other 的 tl.load
+3. ...
+
+### 关键修改说明
+
+- 修改点 1：...
+- 修改点 2：...
+```
+```
+
+**Tool: read**
+
+**Input:**
+```json
+{
+  "filePath": "/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/chunk_delta_h.py"
+}
+```
+
+**Output:**
+```
+<path>/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/chunk_delta_h.py</path>
+<type>file</type>
+<content>1: # SPDX-License-Identifier: Apache-2.0
+2: # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+3: # SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
+4: #
+5: # This file contains code copied from the flash-linear-attention project.
+6: # The original source code was licensed under the MIT license and included
+7: # the following copyright notice:
+8: # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+9: # ruff: noqa: E501
+10: # mypy: ignore-errors
+11: 
+12: import torch
+13: from vllm.triton_utils import tl, triton
+14: 
+15: from .utils import prepare_chunk_indices, prepare_chunk_offsets, safe_exp
+16: 
+17: _CONDITIONS = ("seq7168",)
+18: 
+19: 
+20: @triton.heuristics(
+21:     {
+22:         "USE_G": lambda args: args["g"] is not None,
+23:         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
+24:         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
+25:         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
+26:         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+27:     }
+28: )
+29: @triton.jit(do_not_specialize=["T", "H", "Hg", "K", "V"])
+30: def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
+31:     k,
+32:     v,
+33:     w,
+34:     v_new,
+35:     g,
+36:     h,
+37:     h0,
+38:     ht,
+39:     cu_seqlens,
+40:     chunk_offsets,
+41:     h_update,
+42:     T,
+43:     H,
+44:     Hg,
+45:     K,
+46:     V,
+47:     BT: tl.constexpr,
+48:     USE_G: tl.constexpr,
+49:     USE_INITIAL_STATE: tl.constexpr,
+50:     STORE_FINAL_STATE: tl.constexpr,
+51:     SAVE_NEW_VALUE: tl.constexpr,
+52:     IS_VARLEN: tl.constexpr,
+53: ):
+54:     i_nh = tl.program_id(1)
+55:     i_n, i_h = i_nh // H, i_nh % H
+56:     T_max = 1 * T
+57:     if IS_VARLEN:
+58:         bos, eos = (
+59:             tl.load(cu_seqlens + i_n).to(tl.int32),
+60:             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+61:         )
+62:         T = eos - bos
+63:         NT = tl.cdiv(T, BT)
+64:         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+65:     else:
+66:         bos, eos = i_n * T, i_n * T + T
+67:         NT = tl.cdiv(T, BT)
+68:         boh = i_n * NT
+69: 
+70:     stride_v = H * V
+71:     stride_k = Hg * K
+72:     stride_w = H * K
+73: 
+74:     b_h1_bv1 = tl.zeros([128, 64], dtype=tl.float32)
+75:     b_h1_bv2 = tl.zeros([128, 64], dtype=tl.float32)
+76:     # create b_hupd_bv1 and b_hupd_bv2
+77: 
+78:     v_start1 = 0
+79:     v_start2 = 64
+80: 
+81:     offs_k = tl.arange(0, 128)[:, None]
+82:     offs_v1 = v_start1 + tl.arange(0, 64)[None, :]
+83:     offs_v2 = v_start2 + tl.arange(0, 64)[None, :]
+84:     mask_kv1 = (offs_k < K) & (offs_v1 < V)
+85:     mask_kv2 = (offs_k < K) & (offs_v2 < V)
+86: 
+87:     # load initial state
+88:     if USE_INITIAL_STATE:
+89:         h0_ptr = h0 + i_nh * K * V
+90:         ptr_h0_bv1 = h0_ptr + offs_k * V + offs_v1 * 1
+91:         b_h1_bv1 += tl.load(ptr_h0_bv1, mask=mask_kv1, other=0.0).to(tl.float32)
+92: 
+93:         ptr_h0_bv2 = h0_ptr + offs_k * V + offs_v2 * 1
+94:         b_h1_bv2 += tl.load(ptr_h0_bv2, mask=mask_kv2, other=0.0).to(tl.float32)
+95: 
+96:     # main recurrence
+97:     for i_t in range(NT):
+98:         h_base = h + (boh + i_t) * H * K * V + i_h * K * V
+99: 
+100:         p_h1_bv1 = tl.make_block_ptr(h_base, (K, V), (V, 1), (0, v_start1), (128, 64), (1, 0))
+101:         tl.store(p_h1_bv1, b_h1_bv1.to(p_h1_bv1.dtype.element_ty), boundary_check=(0, 1))
+102: 
+103:         p_h1_bv2 = tl.make_block_ptr(h_base, (K, V), (V, 1), (0, v_start2), (128, 64), (1, 0))
+104:         tl.store(p_h1_bv2, b_h1_bv2.to(p_h1_bv2.dtype.element_ty), boundary_check=(0, 1))
+105: 
+106:         offs_t_wv = (i_t * BT + tl.arange(0, BT))[:, None]
+107:         offs_k_wv = tl.arange(0, 128)[None, :]
+108:         mask_w = (offs_t_wv < T) & (offs_k_wv < K)
+109: 
+110:         w_base = w + bos * H * K + i_h * K
+111:         ptr_w = w_base + offs_t_wv * stride_w + offs_k_wv * 1
+112:         b_w = tl.load(ptr_w, mask=mask_w, other=0.0)
+113: 
+114:         k_base = k + bos * Hg * K + (i_h // (H // Hg)) * K
+115:         p_k = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT), (128, BT), (0, 1))
+116:         b_k = tl.load(p_k, boundary_check=(0, 1))
+117: 
+118:         v_new_base = v_new + bos * H * V + i_h * V
+119: 
+120:         last_idx = min((i_t + 1) * BT, T) - 1
+121:         b_g_last = tl.load(g + bos + i_h * T_max + last_idx)
+122: 
+123:         offs_t = i_t * BT + tl.arange(0, BT)
+124:         mask_t = offs_t < T
+125:         g_ptr = g + bos + i_h * T_max
+126:         b_g = tl.load(g_ptr + offs_t, mask=mask_t, other=0.0)
+127: 
+128:         b_g = safe_exp(b_g_last - b_g)
+129:         b_g_last = tl.exp(b_g_last)
+130: 
+131:         offs_t_v = (i_t * BT + tl.arange(0, BT))[:, None]
+132:         mask_v1 = (offs_t_v < T) & (offs_v1 < V)
+133: 
+134:         v_base = v + bos * H * V + i_h * V
+135:         ptr_v1 = v_base + offs_t_v * stride_v + offs_v1 * 1
+136:         b_v1 = tl.load(ptr_v1, mask=mask_v1, other=0.0)
+137:         b_v_new1 = b_v1.to(tl.float32)
+138:         b_v_new1 -= tl.dot(b_w, b_h1_bv1.to(b_w.dtype))
+139: 
+140:         if SAVE_NEW_VALUE:
+141:             p_v_new1 = tl.make_block_ptr(v_new_base, (T, V), (stride_v, 1), (i_t * BT, v_start1), (BT, 64), (1, 0))
+142:             tl.store(p_v_new1, b_v_new1.to(p_v_new1.dtype.element_ty), boundary_check=(0, 1))
+143: 
+144:         if USE_G:
+145:             b_v_new1 = b_v_new1 * b_g[:, None]
+146:             b_h1_bv1 = b_h1_bv1 * b_g_last
+147: 
+148:         b_v_new1 = b_v_new1.to(k.dtype.element_ty)
+149:         b_h1_bv1 += tl.dot(b_k, b_v_new1)
+150: 
+151:         mask_v2 = (offs_t_v < T) & (offs_v2 < V)
+152:         ptr_v2 = v_base + offs_t_v * stride_v + offs_v2 * 1
+153:         b_v2 = tl.load(ptr_v2, mask=mask_v2, other=0.0)
+154:         b_v_new2 = b_v2.to(tl.float32)
+155:         b_v_new2 -= tl.dot(b_w, b_h1_bv2.to(b_w.dtype))
+156: 
+157:         if SAVE_NEW_VALUE:
+158:             p_v_new2 = tl.make_block_ptr(v_new_base, (T, V), (stride_v, 1), (i_t * BT, v_start2), (BT, 64), (1, 0))
+159:             tl.store(p_v_new2, b_v_new2.to(p_v_new2.dtype.element_ty), boundary_check=(0, 1))
+160: 
+161:         if USE_G:
+162:             b_v_new2 = b_v_new2 * b_g[:, None]
+163:             b_h1_bv2 = b_h1_bv2 * b_g_last
+164: 
+165:         b_v_new2 = b_v_new2.to(k.dtype.element_ty)
+166:         b_h1_bv2 += tl.dot(b_k, b_v_new2)
+167: 
+168:     # epilogue
+169:     if STORE_FINAL_STATE:
+170:         ht_ptr = ht + i_nh * K * V
+171: 
+172:         p_ht1_bv1 = tl.make_block_ptr(ht_ptr, (K, V), (V, 1), (0, v_start1), (128, 64), (1, 0))
+173:         tl.store(p_ht1_bv1, b_h1_bv1.to(p_ht1_bv1.dtype.element_ty), boundary_check=(0, 1))
+174: 
+175:         p_ht1_bv2 = tl.make_block_ptr(ht_ptr, (K, V), (V, 1), (0, v_start2), (128, 64), (1, 0))
+176:         tl.store(p_ht1_bv2, b_h1_bv2.to(p_ht1_bv2.dtype.element_ty), boundary_check=(0, 1))
+177: 
+178: 
+179: def chunk_gated_delta_rule_fwd_h(
+180:     k: torch.Tensor,
+181:     w: torch.Tensor,
+182:     u: torch.Tensor,
+183:     g: torch.Tensor | None = None,
+184:     initial_state: torch.Tensor | None = None,
+185:     output_final_state: bool = False,
+186:     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+187:     save_new_value: bool = True,
+188:     cu_seqlens: torch.LongTensor | None = None,
+189:     chunk_indices: torch.Tensor | None = None,
+190:     chunk_offsets: torch.Tensor | None = None,
+191: ) -> tuple[torch.Tensor, torch.Tensor]:
+192:     # This kernel is slightly different from fla to support Q/K with different head numbers.
+193:     # In fla, Q/K always have the same head number, so Hg is always equal to H.
+194:     B, T, Hg, K, V = *k.shape, u.shape[-1]
+195:     H = u.shape[-2]
+196:     BT = chunk_size
+197: 
+198:     if cu_seqlens is not None and chunk_indices is None:
+199:         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+200:     # N: the actual number of sequences in the batch with either equal or variable lengths
+201:     if cu_seqlens is None:
+202:         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+203:     else:
+204:         if chunk_offsets is None:
+205:             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
+206:         N, NT, chunk_offsets = (
+207:             len(cu_seqlens) - 1,
+208:             len(chunk_indices),
+209:             chunk_offsets,
+210:         )
+211:     assert K <= 256, "current kernel does not support head dimension larger than 256."
+212: 
+213:     h = k.new_empty(B, NT, H, K, V)
+214:     h_update = k.new_empty(B, NT, H, K, K)
+215:     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
+216: 
+217:     v_new = torch.empty_like(u) if save_new_value else None
+218:     g = g.transpose(1, 2).contiguous()
+219: 
+220:     def grid(meta):
+221:         return (1, N * H)
+222: 
+223:     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+224:         k=k,
+225:         v=u,
+226:         w=w,
+227:         v_new=v_new,
+228:         g=g,
+229:         h=h,
+230:         h0=initial_state,
+231:         ht=final_state,
+232:         cu_seqlens=cu_seqlens,
+233:         chunk_offsets=chunk_offsets,
+234:         h_update=h_update,
+235:         T=T,
+236:         H=H,
+237:         Hg=Hg,
+238:         K=K,
+239:         V=V,
+240:         BT=BT,
+241:         num_warps=4,
+242:         num_stages=2,
+243:     )
+244:     return h, v_new, final_state
+
+(End of file - total 244 lines)
+</content>
+
+<system-reminder>
+Instructions from: /vllm-workspace/vllm-ascend/AGENTS.md
+# vLLM Ascend Development Guidelines
+
+This document provides instructions for contributors to the vLLM Ascend project. Please read and follow these guidelines to ensure code quality, maintainability, and consistency.
+
+---
+
+## Table of Contents
+
+- [Setup and Environment](#setup-and-environment)
+    - [Environment Variables](#environment-variables)
+    - [Environment Variable Review Requirement](#environment-variable-review-requirement)
+- [Testing](#testing)
+    - [Unit and System Tests](#unit-and-system-tests)
+    - [Running Tests](#running-tests)
+- [Code Style](#code-style)
+    - [Python Conventions](#python-conventions)
+    - [Naming Conventions](#naming-conventions)
+- [NPU-Specific Considerations](#npu-specific-considerations)
+    - [Tensor item() Operations](#tensor-item-operations)
+    - [Memory and Performance](#memory-and-performance)
+- [Model and Plugin Architecture](#model-and-plugin-architecture)
+    - [vLLM Ascend Plugin Architecture](#vllm-ascend-plugin-architecture)
+    - [Patching Requirement](#patching-requirement)
+    - [Model Runner Changes](#model-runner-changes)
+- [Commit Messages and Pull Requests](#commit-messages-and-pull-requests)
+    - [Commit Message Format](#commit-message-format)
+- [Review Checklist](#review-checklist)
+    - [Code Quality](#code-quality)
+    - [Testing](#testing-1)
+    - [Documentation](#documentation)
+    - [NPU Considerations](#npu-considerations)
+    - [Commit and PR](#commit-and-pr)
+- [Quick Start for Contributors](#quick-start-for-contributors)
+- [References](#references)
+
+---
+
+## Setup and Environment
+
+### Environment Variables
+
+All environment variables must be defined in `vllm_ascend/envs.py` using the centralized `env_variables` dictionary.
+
+**Requirements:**
+
+- Add documentation for each environment variable in the `env_variables` dict comment
+- Specify default values and valid ranges
+- Indicate whether the variable is sensitive (credentials, keys)
+
+**Example:**
+
+```python
+env_variables = {
+    "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
+    # ...
+}
+```
+
+**Never**: Hardcode environment variable names throughout the codebase. Reference them from the central module using `from vllm_ascend import envs`.
+
+### Environment Variable Review Requirement
+
+**Strict Review Required**: All new environment variables must undergo code review.
+
+Reviewers must verify:
+
+- The variable name follows the `VLLM_ASCEND_*` naming convention
+- Default value is appropriate for all supported hardware
+- Documentation is added to the `env_variables` dict
+- The variable is used in a performance-critical path
+
+---
+
+## Testing
+
+### Unit and System Tests
+
+**Requirement**: All new functionality requires corresponding tests.
+
+- **Unit Tests (UT)**: Located in `tests/ut/`, cover core logic, edge cases, and error conditions
+- **System Tests (ST)**: Located in `tests/e2e/`, verify end-to-end behavior and integration points
+- **Nightly Tests**: Include benchmarks for NPU-specific code paths in `tests/e2e/nightly/`
+
+**Test Coverage Guidelines:**
+
+- New features: Tests must cover happy path and failure modes
+- Bug fixes: Tests must include a regression test for the bug
+- Performance-critical code: Include benchmarks and performance regression tests
+
+### Running Tests
+
+```bash
+
+
+# Run specific unit test file
+pytest -sv tests/ut/ops/test_prepare_finalize.py
+
+# Run specific unit test
+pytest -sv tests/ut/ops/test_prepare_finalize.py::test_prepare_inputs
+
+# Run NPU-specific tests (requires NPU hardware)
+pytest -sv tests/e2e/singlecard/test_piecewise_res_consistency
+```
+
+**Requirement**: Run all tests locally before requesting review. Verify tests pass on NPU hardware for NPU-specific changes.
+
+---
+
+## Code Style
+
+### Python Conventions
+
+- **Imports**: All imports at the top of the file. Valid exceptions:
+    - Circular imports (use inline imports)
+    - Lazy loading for worker/isolation processes
+    - Type-checking imports wrapped in `if TYPE_CHECKING:`
+
+- **Global Variables**: Avoid new global variables. Pass dependencies explicitly through function parameters.
+
+    **Allowed:**
+    - Constants named `ALL_UPPER_CASE` (e.g., `MAX_BATCH_SIZE` in `envs.py`)
+    - Immutable configuration objects
+
+    **Requires Approval:**
+    - Any new mutable global state
+
+- **No Magic Numbers**: Use named constants with descriptive names:
+
+    ```python
+    # Bad
+    if seq_len > 2048: ...
+
+    # Good
+    MAX_CONTEXT_LENGTH = 2048
+    if seq_len > MAX_CONTEXT_LENGTH: ...
+    ```
+
+- **Descriptive Naming**: Use names that describe functionality, not implementation details.
+
+    ```python
+    # Bad
+    is_deepseek_v3_r1
+    flag1
+    tmp_var
+
+    # Good
+    supports_dynamic_temperature
+    uses_speculative_decoding
+    ```
+
+### Naming Conventions
+
+- **Classes**: `PascalCase` (e.g., `NPUModelRunner`, `AscendSampler`, `ACLGraphManager`)
+- **Functions/Methods**: `snake_case` (e.g., `forward_pass`, `compute_attention`)
+- **Constants**: `ALL_UPPER_CASE` (e.g., `MAX_BATCH_SIZE`, `VLLM_ASCEND_ENABLE_NZ`)
+- **Variables**: `snake_case` (e.g., `token_ids`, `sequence_lengths`)
+
+---
+
+## NPU-Specific Considerations
+
+### Tensor item() Operations
+
+**Warning**: `tensor.item()` operations cause synchronization overhead on NPU when the `tensor` is on device.
+
+If the `tensor` is a device tensor, the operator `item()` will trigger a synchronous data transfer from NPU to CPU, which can severely degrade performance in hot paths, cause this will make `AsyncScheduler` block here.
+
+**Review Requirements:**
+
+1. Profile performance impact before merging
+2. Consider alternative patterns:
+    - Keep values on device when possible
+    - Batch operations to reduce sync frequency
+    - Use device-side operations (e.g., `torch.argmax`, `torch.sum`)
+3. Document when `item()` is unavoidable (e.g., logging, conditional logic)
+
+**Example Patterns:**
+
+```python
+# Bad: In hot loop - causes sync per iteration
+for tensor in tensors:
+    value = tensor.item()
+
+# Better: Batch operations - single sync
+values = [t.item() for t in tensors]  # Single batch sync
+
+# Good: Keep on device when possible
+max_value = torch.max(tensor)  # No sync needed
+if max_value > threshold:  # Comparison can stay on device
+    ...
+```
+
+### Memory and Performance
+
+Additional NPU-specific best practices:
+
+- Avoid CPU-NPU memory transfers in hot paths
+- Prefer in-place operations where safe (e.g., `x.add_()`, `x.mul_()`)
+- Monitor memory fragmentation, especially for long-running processes
+- Test with realistic workloads on actual NPU hardware (Ascend 910B/C)
+
+---
+
+## Model and Plugin Architecture
+
+### vLLM Ascend Plugin Architecture
+
+vLLM Ascend is a **hardware plugin** that integrates with upstream vLLM via the pluggable hardware interface. It does not add new model files directly.
+
+**Required Pattern**: Model-specific functionality should be implemented via:
+
+1. **Patching** (in `vllm_ascend/patch/`):
+    - `vllm_ascend/patch/platform/` - Platform-level patches (distributed, scheduling)
+    - `vllm_ascend/patch/worker/` - Worker-level patches (model-specific behavior)
+    - Example: `patch_deepseek.py` modifies upstream Deepseek model behavior
+    - Patch is not the best solution for all cases. Use it when necessary.
+
+2. **Inheritance**:
+    - `NPUModelRunner(GPUModelRunner)` - Extend vLLM model runner with NPU-specific behavior
+    - `AscendSampler` - Extend vLLM sampler with NPU-specific operations
+    - Add NPU-specific components via composition (e.g., `AclGraphManager`)
+    - Custom Operators - NPU-specific custom operators (e.g., `AscendRMSNorm`)
+
+3. **External upstream contributions** where appropriate
+
+### Patching Requirement
+
+**Strict Review Required**: All new patches must undergo thorough architectural review.
+
+Reviewers must verify:
+
+- The patch targets the correct upstream component
+- The patch is minimal and focused
+- Performance implications are understood
+- A long-term plan exists for upstream contribution
+
+**Example Patch Pattern:**
+
+```python
+# vllm_ascend/patch/worker/patch_deepseek.py
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
+
+def forward(self, input_ids, positions, ...):
+    # NPU-specific forward implementation
+    ...
+
+DeepseekV2Model.forward = forward  # Patch upstream class
+```
+
+### Model Runner Changes
+
+**Strict Review Required**: All new behaviors added to `model_runner` must undergo thorough architectural review.
+
+Reviewers must verify:
+
+- The necessity of the new behavior (why can't this be in a patch?)
+- Performance implications on NPU hardware
+- Compatibility with existing model implementations
+- Long-term maintainability and test coverage
+
+**NPU Model Runner Files:**
+
+- `vllm_ascend/worker/model_runner_v1.py` - vLLM v1 model runner
+- `vllm_ascend/worker/v2/model_runner.py` - vLLM v2 model runner
+- `vllm_ascend/_310p/model_runner_310p.py` - Ascend 310P model runner
+
+---
+
+## Commit Messages and Pull Requests
+
+### Commit Message Format
+
+Follow the [Conventional Commits](https://www.conventionalcommits.org/) format and **must include a sign-off**:
+
+```bash
+git commit -s -m "<type>: <summary>" -m "<body - explaining what changed and why>"
+```
+
+Or using the full message format:
+
+```txt
+<type>: <summary>
+
+<body - explaining what changed and why>
+
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+**Valid Types**: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`
+
+**Good Examples:**
+
+```txt
+feat(npu): add flash attention support for Ascend CANN
+
+- Implements FlashAttention-2 kernel for NPU backend
+- Reduces memory usage by 30% compared to baseline
+
+fix(model_runner): correct padding token handling
+
+- Fixes token padding that caused incorrect attention masks
+- Addresses issue #1234
+
+perf: avoid CPU-NPU sync in attention computation
+
+- Inline computation to avoid tensor.item() calls
+- Improves throughput by 15%
+```
+
+**Bad Examples:**
+
+```txt
+fix bug
+add feature
+update code
+```
+
+### Pull Request Title Format
+
+PR titles should follow the format: `[Type][Module] Description`
+
+- **Type**: The type of change (e.g., `CI`, `Doc`, `Bugfix`, `Feat`, `Platform`, `Refactor`)
+- **Module**: The affected module (optional, e.g., `Misc`, `Model`, `Worker`)
+- **Description**: Brief description of the change
+
+**Examples:**
+
+- `[Doc][Misc] Update contribution guidelines`
+- `[Bugfix] Fix CPU binding logic`
+- `[CI] Update image build workflow`
+
+### Pull Request Template
+
+When creating a PR, please follow the template in `.github/PULL_REQUEST_TEMPLATE.md` and ensure the following sections are completed:
+
+> **Note**: The PR description will be automatically updated by GitHub Actions to include vLLM version info at the bottom. If you update the PR description via API or CLI, make sure to preserve the `- vLLM version:` and `- vLLM main:` lines.
+
+- **What this PR does / why we need it?** - Clearly describe the changes and their purpose
+- **Does this PR introduce _any_ user-facing change?** - Indicate if there are any user-visible changes
+- **How was this patch tested?** - Describe how you tested the changes. Examples:
+    - Unit tests added/updated: list the test files
+    - Manual testing: provide the test steps and commands
+    - CI testing: indicate if only CI verification is needed
+
+---
+
+## Review Checklist
+
+Before merging, verify:
+
+### Code Quality
+
+- [ ] Code follows style guidelines (naming, imports, no magic numbers)
+- [ ] No global state added without justification
+- [ ] Patching pattern used correctly (if applicable)
+- [ ] No direct model file additions
+
+### Testing
+
+- [ ] New tests added for new functionality (`tests/ut/` or `tests/e2e/`)
+- [ ] Existing tests pass
+- [ ] NPU-specific tests verified on actual hardware
+- [ ] Performance benchmarks included where applicable
+
+### Documentation
+
+- [ ] Environment variables documented
+- [ ] Public APIs documented
+- [ ] User-facing changes reflected in docs
+
+### NPU Considerations
+
+- [ ] `tensor.item()` usage reviewed for performance impact
+- [ ] No unnecessary CPU-NPU transfers in hot paths
+- [ ] Memory usage verified on NPU hardware
+
+### Commit and PR
+
+- [ ] Commit messages are clear and descriptive, following Conventional Commits format
+- [ ] **All commits are signed off** (`git commit -s`)
+- [ ] PR is created from your fork repository, not directly from the main repository
+- [ ] PR description is complete, following the PR template
+- [ ] All review comments addressed
+
+---
+
+## Quick Start for Contributors
+
+1. Install development dependencies: `pip install -e .[dev]`
+2. Run tests: `pytest tests/`
+3. Check linting: `ruff check vllm_ascend/`
+4. Format code: `ruff format vllm_ascend/`
+5. Make your changes following guidelines in this document
+6. Add tests for new behavior
+7. Run full test suite before committing
+8. Commit with sign-off: `git commit -s`
+9. Run linting check before pushing:
+   ```bash
+   bash format.sh ci
+   ```
+   > **Note**: This check is required for **all file types**, including markdown files. If `markdownlint` modifies files, re-add them with `git add` and commit again.
+10. Push to your fork repository (NOT the main repository):
+
+   ```bash
+   git remote add myfork https://github.com/YOUR_USERNAME/vllm-ascend.git
+   git push -u myfork your-branch-name
+   ```
+
+11. Create a PR from your fork to the main repository with clear description
+
+---
+
+## References
+
+- [vLLM Hardware Plugin RFC](https://github.com/vllm-project/vllm/issues/11162)
+- [Documentation](https://docs.vllm.ai/projects/ascend/en/latest/)
+- [Contributors Guide](https://docs.vllm.ai/projects/ascend/en/latest/community/contributors.html)
+
+</system-reminder>
+```
+
+**Tool: read**
+
+**Input:**
+```json
+{
+  "filePath": "/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/benchmark_delta_h.py"
+}
+```
+
+**Output:**
+```
+<path>/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/benchmark_delta_h.py</path>
+<type>file</type>
+<content>1: import torch
+2: import triton.testing
+3: from vllm_ascend.ops.triton.fla.chunk_delta_h import (
+4:     chunk_gated_delta_rule_fwd_h
+5: )
+6: 
+7: shape_list = [
+8:     "1,10288,2,128;1,10288,8,128;1,10288,8,128;1,8,10288",
+9:     "1,10012,4,128;1,10012,16,128;1,10012,16,128;1,16,10012",
+10:     "1,10016,2,128;1,10016,8,128;1,10016,8,128;1,8,10016",
+11: ]
+12: 
+13: dtype_list = [
+14:     torch.bfloat16,
+15:     torch.float32,
+16: ]
+17: 
+18: chunk_size = 128
+19: device = "npu"
+20: 
+21: def build_inputs(shape_str, dtype):
+22: 
+23:     shapes = [list(map(int, s.split(',')))
+24:               for s in shape_str.split(';')]
+25: 
+26:     B, T, Hg, K = shapes[0]
+27:     _, _, H, _ = shapes[1]
+28:     _, _, _, V = shapes[2]
+29: 
+30:     torch.manual_seed(42)
+31:     torch.npu.manual_seed(42)
+32: 
+33:     k = torch.randn(B, T, Hg, K, device=device, dtype=dtype)
+34:     w = torch.randn(B, T, H, K, device=device, dtype=dtype)
+35:     u = torch.randn(B, T, H, V, device=device, dtype=dtype)
+36: 
+37:     g_raw = torch.randn(B, H, T, device=device, dtype=torch.float32)
+38:     g = g_raw.transpose(1, 2)
+39: 
+40:     initial_state = torch.randn(
+41:         B, H, K, V,
+42:         device=device,
+43:         dtype=torch.float32
+44:     )
+45: 
+46:     return (B, T, H, K, V), (k, w, u, g, initial_state)
+47: 
+48: def benchmark_one(shape_str, dtype):
+49: 
+50:     meta, inputs = build_inputs(shape_str, dtype)
+51:     B, T, H, K, V = meta
+52:     k, w, u, g, initial_state = inputs
+53: 
+54:     def run():
+55:         chunk_gated_delta_rule_fwd_h(
+56:             k=k,
+57:             w=w,
+58:             u=u,
+59:             g=g,
+60:             initial_state=initial_state,
+61:             output_final_state=True,
+62:             chunk_size=chunk_size,
+63:             save_new_value=True,
+64:             cu_seqlens=None
+65:         )
+66: 
+67:     torch.npu.synchronize()
+68:     torch.npu.empty_cache()
+69: 
+70:     ms, min_ms, max_ms = triton.testing.do_bench(
+71:         run,
+72:         warmup=50,
+73:         rep=200,
+74:         quantiles=[0.5, 0.2, 0.8],
+75:     )
+76: 
+77:     tokens_per_sec = (B * T) / (ms * 1e-3)
+78:     flops = 2 * B * T * H * K * V
+79:     tflops = flops / (ms * 1e-3) / 1e12
+80: 
+81:     return {
+82:         "shape": shape_str,
+83:         "dtype": str(dtype).split(".")[-1],
+84:         "Task Duration:": ms,
+85:         "TFLOPS": tflops,
+86:     }
+87: 
+88: 
+89: def benchmark_all():
+90: 
+91:     results = []
+92: 
+93:     for shape in shape_list:
+94:         for dtype in dtype_list:
+95: 
+96:             result = benchmark_one(shape, dtype)
+97:             results.append(result)
+98: 
+99:     for r in results:
+100:         print(
+101:             f"shape: {r['shape']} | "
+102:             f"dtype: {r['dtype']} | "
+103:             f"Task Duration: {r['Task Duration:']:.2f} ms | "
+104:             f"TFLOPS: {r['TFLOPS']:.2f}"
+105:         )
+106: 
+107: 
+108: if __name__ == "__main__":
+109:     benchmark_all()
+
+(End of file - total 109 lines)
+</content>
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 5.9s)
+
+现在让我读取相关的 utils 文件和 triton_utils，并进行环境配置和基线测试：
+
+**Tool: read**
+
+**Input:**
+```json
+{
+  "filePath": "/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla"
+}
+```
+
+**Output:**
+```
+<path>/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla</path>
+<type>directory</type>
+<entries>
+__init__.py
+__pycache__/
+benchmark_delta_h.py
+chunk_delta_h.py
+chunk_delta_hupdate.py
+chunk_o_update.py
+chunk_o.py
+chunk_scaled_dot_kkt.py
+chunk.py
+cumsum.py
+fused_qkvzba_split_reshape.py
+l2norm.py
+layernorm_guard.py
+sigmoid_gating.py
+solve_tril.py
+utils.py
+wy_fast.py
+
+(17 entries)
+</entries>
+[Category+Skill Reminder]
+
+**Built-in**: playwright, frontend-ui-ux, git-master, dev-browser
+**⚡ YOUR SKILLS (PRIORITY)**: vector-triton-ascend-ops-optimizer, triton-ascend-ops-optimizer
+
+> User-installed skills OVERRIDE built-in defaults. ALWAYS prefer YOUR SKILLS when domain matches.
+
+```typescript
+task(category="visual-engineering", load_skills=["vector-triton-ascend-ops-optimizer"], run_in_background=true)
+```
+
+```
+
+**Tool: read**
+
+**Input:**
+```json
+{
+  "filePath": "/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/triton_utils.py"
+}
+```
+
+**Output:**
+```
+<path>/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/triton_utils.py</path>
+<type>file</type>
+<content>1: from typing import Any
+2: 
+3: import torch
+4: from vllm.triton_utils import HAS_TRITON, tl, triton
+5: 
+6: _NUM_AICORE = -1
+7: _NUM_VECTORCORE = -1
+8: _extension_module = None
+9: 
+10: if HAS_TRITON:
+11:     try:
+12:         import triton.language.extra.cann.extension as _extension_module  # type: ignore
+13:     except ImportError:
+14:         _extension_module = None
+15: 
+16: 
+17: def _resolve_triton_ascend_op(op_name: str):
+18:     if not HAS_TRITON:
+19:         raise RuntimeError(f"Triton op '{op_name}' cannot be resolved because HAS_TRITON is False")
+20: 
+21:     if _extension_module is not None:
+22:         extension_op = getattr(_extension_module, op_name, None)
+23:         if extension_op is not None:
+24:             return extension_op
+25: 
+26:     tl_op = getattr(tl, op_name, None)
+27:     if tl_op is not None:
+28:         return tl_op
+29: 
+30:     raise RuntimeError(
+31:         f"Failed to resolve Triton op '{op_name}': "
+32:         "neither triton.language.extra.cann.extension nor triton.language provides it."
+33:     )
+34: 
+35: 
+36: if HAS_TRITON:
+37:     insert_slice = _resolve_triton_ascend_op("insert_slice")
+38:     extract_slice = _resolve_triton_ascend_op("extract_slice")
+39:     get_element = _resolve_triton_ascend_op("get_element")
+40: else:
+41:     insert_slice = None
+42:     extract_slice = None
+43:     get_element = None
+44: 
+45: 
+46: def init_device_properties_triton():
+47:     global _NUM_AICORE, _NUM_VECTORCORE
+48:     if _NUM_AICORE == -1 and HAS_TRITON:
+49:         device_properties: dict[str, Any] = triton.runtime.driver.active.utils.get_device_properties(
+50:             torch.npu.current_device()
+51:         )
+52:         _NUM_AICORE = device_properties.get("num_aicore", -1)
+53:         _NUM_VECTORCORE = device_properties.get("num_vectorcore", -1)
+54:         assert _NUM_AICORE > 0 and _NUM_VECTORCORE > 0, "Failed to detect device properties."
+55: 
+56: 
+57: def get_aicore_num():
+58:     global _NUM_AICORE
+59:     assert _NUM_AICORE > 0, "Device properties not initialized. Please call init_device_properties_triton() first."
+60:     return _NUM_AICORE
+61: 
+62: 
+63: def get_vectorcore_num():
+64:     global _NUM_VECTORCORE
+65:     assert _NUM_VECTORCORE > 0, "Device properties not initialized. Please call init_device_properties_triton() first."
+66:     return _NUM_VECTORCORE
+
+(End of file - total 66 lines)
+</content>
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 4.0s)
+
+**Tool: read**
+
+**Input:**
+```json
+{
+  "filePath": "/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/utils.py"
+}
+```
+
+**Output:**
+```
+<path>/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/utils.py</path>
+<type>file</type>
+<content>1: # SPDX-License-Identifier: Apache-2.0
+2: # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+3: # SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
+4: #
+5: # This file contains code copied from the flash-linear-attention project.
+6: # The original source code was licensed under the MIT license and included
+7: # the following copyright notice:
+8: # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+9: # ruff: noqa: E501
+10: import contextlib
+11: import functools
+12: from collections.abc import Callable
+13: 
+14: import torch
+15: from vllm.triton_utils import tl, triton
+16: 
+17: 
+18: def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
+19:     return cu_seqlens[1:] - cu_seqlens[:-1]
+20: 
+21: 
+22: def prepare_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+23:     indices = torch.cat([torch.arange(n) for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()])
+24:     return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
+25: 
+26: 
+27: def prepare_final_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+28:     indices = triton.cdiv(prepare_lens(cu_seqlens), chunk_size) + 1
+29:     return torch.cumsum(indices, 0) - 1
+30: 
+31: 
+32: def prepare_chunk_offsets(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+33:     return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]).cumsum(-1)
+34: 
+35: 
+36: def prepare_update_chunk_offsets(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+37:     return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size) + 1]).cumsum(-1)
+38: 
+39: 
+40: def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
+41:     """
+42:     A decorator to make sure all input tensors are contiguous and set the device based on input tensors.
+43:     """
+44: 
+45:     @functools.wraps(fn)
+46:     def wrapper(*args, **kwargs):
+47:         contiguous_args = (i if not isinstance(i, torch.Tensor) else i.contiguous() for i in args)
+48:         contiguous_kwargs = {k: (v if not isinstance(v, torch.Tensor) else v.contiguous()) for k, v in kwargs.items()}
+49: 
+50:         tensor = None
+51:         for arg in args:
+52:             if isinstance(arg, torch.Tensor):
+53:                 tensor = arg
+54:                 break
+55:         if tensor is None:
+56:             for value in kwargs.values():
+57:                 if isinstance(value, torch.Tensor):
+58:                     tensor = value
+59:                     break
+60: 
+61:         if tensor is not None:
+62:             ctx = torch.npu.device(tensor.device.index)
+63:         else:
+64:             ctx = contextlib.nullcontext()
+65: 
+66:         with ctx:
+67:             return fn(*contiguous_args, **contiguous_kwargs)
+68: 
+69:     return wrapper
+70: 
+71: 
+72: @triton.jit
+73: def safe_exp(x):
+74:     return tl.exp(tl.where(x <= 0, x, float("-inf")))
+
+(End of file - total 74 lines)
+</content>
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 5.9s)
+
+现在我对代码有了充分了解。让我进行环境配置并运行基线测试：
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH && source /usr/local/Ascend/ascend-toolkit/set_env.sh && echo \"Environment configured successfully\"",
+  "description": "Configure Ascend NPU environment"
+}
+```
+
+**Output:**
+```
+Environment configured successfully
+
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 5.4s)
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && echo \"Cache cleared\"",
+  "description": "Clear triton cache before baseline test",
+  "workdir": "/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla"
+}
+```
+
+**Output:**
+```
+Cache cleared
+
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 64.9s)
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH && source /usr/local/Ascend/ascend-toolkit/set_env.sh && ASCEND_RT_VISIBLE_DEVICES=\"4\" python3 /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/benchmark_delta_h.py 2>&1",
+  "description": "Run baseline performance benchmark",
+  "timeout": 300000
+}
+```
+
+**Output:**
+```
+INFO 03-27 08:55:47 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 03-27 08:55:47 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 03-27 08:55:47 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 03-27 08:55:47 [__init__.py:212] Platform plugin ascend is activated
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+shape: 1,10288,2,128;1,10288,8,128;1,10288,8,128;1,8,10288 | dtype: bfloat16 | Task Duration: 0.81 ms | TFLOPS: 3.32
+shape: 1,10288,2,128;1,10288,8,128;1,10288,8,128;1,8,10288 | dtype: float32 | Task Duration: 0.95 ms | TFLOPS: 2.82
+shape: 1,10012,4,128;1,10012,16,128;1,10012,16,128;1,16,10012 | dtype: bfloat16 | Task Duration: 0.85 ms | TFLOPS: 6.17
+shape: 1,10012,4,128;1,10012,16,128;1,10012,16,128;1,16,10012 | dtype: float32 | Task Duration: 0.99 ms | TFLOPS: 5.32
+shape: 1,10016,2,128;1,10016,8,128;1,10016,8,128;1,8,10016 | dtype: bfloat16 | Task Duration: 0.79 ms | TFLOPS: 3.31
+shape: 1,10016,2,128;1,10016,8,128;1,10016,8,128;1,8,10016 | dtype: float32 | Task Duration: 0.93 ms | TFLOPS: 2.83
+
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 6.4s)
+
+基线性能已记录。现在进行深度代码分析：
+
+**Tool: todowrite**
+
+**Input:**
+```json
+{
+  "todos": [
+    {
+      "content": "记录基线性能数据",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "content": "深度分析代码性能瓶颈",
+      "status": "in_progress",
+      "priority": "high"
+    },
+    {
+      "content": "输出性能瓶颈分析报告",
+      "status": "pending",
+      "priority": "high"
+    }
+  ]
+}
+```
+
+**Output:**
+```
+[
+  {
+    "content": "记录基线性能数据",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "content": "深度分析代码性能瓶颈",
+    "status": "in_progress",
+    "priority": "high"
+  },
+  {
+    "content": "输出性能瓶颈分析报告",
+    "status": "pending",
+    "priority": "high"
+  }
+]
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 28.0s)
+
+现在对代码进行深度分析。让我仔细研究每一个性能瓶颈：
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH && source /usr/local/Ascend/ascend-toolkit/set_env.sh && ASCEND_RT_VISIBLE_DEVICES=\"4\" python3 -c \"\nimport torch\nfrom vllm_ascend.ops.triton.triton_utils import init_device_properties_triton, get_vectorcore_num, get_aicore_num\ninit_device_properties_triton()\nprint(f'VectorCore num: {get_vectorcore_num()}')\nprint(f'AICore num: {get_aicore_num()}')\n\" 2>&1 | grep -v INFO | grep -v WARNING",
+  "description": "Get NPU hardware core count",
+  "timeout": 60000
+}
+```
+
+**Output:**
+```
+VectorCore num: 40
+AICore num: 20
+
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 14.2s)
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH && source /usr/local/Ascend/ascend-toolkit/set_env.sh && ASCEND_RT_VISIBLE_DEVICES=\"4\" python3 -c \"\n# Analyze current grid configuration\n# Shape 1: B=1, T=10288, Hg=2, H=8, K=128, V=128, BT=128\nB, T, H, K, V, BT = 1, 10288, 8, 128, 128, 128\nNT = (T + BT - 1) // BT\nprint(f'NT (chunks) = {NT}')\nprint(f'N*H = {B*H} (grid dimension 1)')\nprint(f'Grid = (1, {B*H}) -> only {B*H} programs launched!')\nprint()\n\n# Shape 2:\nB2, T2, H2, K2, V2 = 1, 10012, 16, 128, 128\nNT2 = (T2 + BT - 1) // BT\nprint(f'Shape2: NT = {NT2}')\nprint(f'Grid = (1, {B2*H2}) -> only {B2*H2} programs launched!')\nprint()\n\nprint('VectorCore num = 40')\nprint('With tl.dot: grid should be (get_vectorcore_num()//2,) = (20,)')\nprint()\nprint(f'Current programs per case:')\nprint(f'  Case1: {B*H} = 8 programs (vs 20 optimal)')\nprint(f'  Case2: {B2*H2} = 16 programs (vs 20 optimal)')\nprint()\nprint('Key issue: grid=(1, N*H) means only N*H programs, not utilizing all cores!')\nprint(f'Each program iterates over ALL {NT} chunks sequentially!')\n\" 2>&1",
+  "description": "Analyze grid configuration and parallelism issues"
+}
+```
+
+**Output:**
+```
+NT (chunks) = 81
+N*H = 8 (grid dimension 1)
+Grid = (1, 8) -> only 8 programs launched!
+
+Shape2: NT = 79
+Grid = (1, 16) -> only 16 programs launched!
+
+VectorCore num = 40
+With tl.dot: grid should be (get_vectorcore_num()//2,) = (20,)
+
+Current programs per case:
+  Case1: 8 = 8 programs (vs 20 optimal)
+  Case2: 16 = 16 programs (vs 20 optimal)
+
+Key issue: grid=(1, N*H) means only N*H programs, not utilizing all cores!
+Each program iterates over ALL 81 chunks sequentially!
+
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 22.8s)
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "python3 -c \"\n# UB Usage analysis for chunk_delta_h kernel\n# BT=128, K=128, V=128, dtype=bf16 (2 bytes)\n\nBT = 128\nK = 128\nV = 128\nV_half = 64  # split into two halves\nbytes_per_elem_bf16 = 2\nbytes_per_elem_f32 = 4\n\nprint('=== UB Usage Analysis for chunk_gated_delta_rule_fwd_kernel_h_blockdim64 ===')\nprint()\n\n# Persistent tensors (accumulated across loop iterations, never freed):\nb_h1_bv1 = 128 * 64 * bytes_per_elem_f32\nb_h1_bv2 = 128 * 64 * bytes_per_elem_f32\nprint(f'b_h1_bv1 (persistent): {b_h1_bv1 / 1024:.1f} KB')\nprint(f'b_h1_bv2 (persistent): {b_h1_bv2 / 1024:.1f} KB')\nprint(f'Persistent total: {(b_h1_bv1 + b_h1_bv2) / 1024:.1f} KB')\nprint()\n\n# Per-iteration tensors (within the loop):\nb_w = BT * K * bytes_per_elem_bf16         # [BT, K] bf16\nb_k = K * BT * bytes_per_elem_bf16         # [K, BT] bf16  \nb_v1 = BT * V_half * bytes_per_elem_bf16   # [BT, 64] bf16\nb_v2 = BT * V_half * bytes_per_elem_bf16   # [BT, 64] bf16\nb_v_new1 = BT * V_half * bytes_per_elem_f32  # [BT, 64] f32\nb_v_new2 = BT * V_half * bytes_per_elem_f32  # [BT, 64] f32\nb_g = BT * bytes_per_elem_f32               # [BT] f32\nb_g_last = bytes_per_elem_f32               # scalar\n\nprint('Per-iteration tensors (peak estimate within one iteration):')\nprint(f'  b_w [BT={BT}, K={K}] bf16: {b_w / 1024:.1f} KB')\nprint(f'  b_k [K={K}, BT={BT}] bf16: {b_k / 1024:.1f} KB')\nprint(f'  b_v1 [BT={BT}, 64] bf16: {b_v1 / 1024:.1f} KB')\nprint(f'  b_v2 [BT={BT}, 64] bf16: {b_v2 / 1024:.1f} KB')\nprint(f'  b_v_new1 [BT={BT}, 64] f32: {b_v_new1 / 1024:.1f} KB')\nprint(f'  b_v_new2 [BT={BT}, 64] f32: {b_v_new2 / 1024:.1f} KB')\nprint(f'  b_g [BT={BT}] f32: {b_g / 1024:.2f} KB')\n\ntotal_per_iter = b_w + b_k + b_v1 + b_v2 + b_v_new1 + b_v_new2 + b_g\nprint(f'  Per-iteration total: {total_per_iter / 1024:.1f} KB')\nprint()\n\ntotal_peak = (b_h1_bv1 + b_h1_bv2) + total_per_iter\nprint(f'Peak UB usage (persistent + per-iter): {total_peak / 1024:.1f} KB')\nprint(f'Available UB (192KB * 50%): {192 * 0.5:.0f} KB')\nprint()\n\nprint('=== Single-token processing analysis ===')\n# Currently: each program processes ALL tokens for one (batch, head) combination\n# The inner loop iterates NT=81 times, each time processing BT=128 tokens\n# This is actually fine for the inner loop structure, BUT\n# the key issue is only N*H programs are launched\n\nprint()\nprint('=== Grid Problem ===')\nprint('Current grid: (1, N*H) with 2D grid')\nprint('This means program_id(0)=0 always, program_id(1) indexes batch*head')\nprint('For N=1, H=8: only 8 programs launched, but NPU has 20 available cubes!')\nprint()\nprint('=== tl.load with other=0.0 ===')\nprint('b_w loaded with other=0.0 -> internally triggers tl.where -> blocks parallelism')\nprint('b_v1/v2 loaded with other=0.0 -> same issue')\nprint('b_g loaded with other=0.0 -> same issue')\nprint('h0 loaded with other=0.0 -> same issue')\n\" 2>&1",
+  "description": "Analyze UB usage and memory access patterns"
+}
+```
+
+**Output:**
+```
+=== UB Usage Analysis for chunk_gated_delta_rule_fwd_kernel_h_blockdim64 ===
+
+b_h1_bv1 (persistent): 32.0 KB
+b_h1_bv2 (persistent): 32.0 KB
+Persistent total: 64.0 KB
+
+Per-iteration tensors (peak estimate within one iteration):
+  b_w [BT=128, K=128] bf16: 32.0 KB
+  b_k [K=128, BT=128] bf16: 32.0 KB
+  b_v1 [BT=128, 64] bf16: 16.0 KB
+  b_v2 [BT=128, 64] bf16: 16.0 KB
+  b_v_new1 [BT=128, 64] f32: 32.0 KB
+  b_v_new2 [BT=128, 64] f32: 32.0 KB
+  b_g [BT=128] f32: 0.50 KB
+  Per-iteration total: 160.5 KB
+
+Peak UB usage (persistent + per-iter): 224.5 KB
+Available UB (192KB * 50%): 96 KB
+
+=== Single-token processing analysis ===
+
+=== Grid Problem ===
+Current grid: (1, N*H) with 2D grid
+This means program_id(0)=0 always, program_id(1) indexes batch*head
+For N=1, H=8: only 8 programs launched, but NPU has 20 available cubes!
+
+=== tl.load with other=0.0 ===
+b_w loaded with other=0.0 -> internally triggers tl.where -> blocks parallelism
+b_v1/v2 loaded with other=0.0 -> same issue
+b_g loaded with other=0.0 -> same issue
+h0 loaded with other=0.0 -> same issue
+
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 36.8s)
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "python3 -c \"\n# Detailed analysis of all performance bottlenecks\n\nprint('======================================================')\nprint('PERFORMANCE BOTTLENECK ANALYSIS SUMMARY')\nprint('======================================================')\nprint()\n\nprint('## BOTTLENECK 1: Grid设计违反规范 - 最严重问题')\nprint('-' * 60)\nprint('当前: def grid(meta): return (1, N * H)')\nprint('问题1: 使用了2D grid (1, N*H) 而不是1D grid')\nprint('问题2: grid大小与输入数据形状关联 (N*H是动态值)')\nprint('问题3: 对于含有tl.dot的Kernel，应使用 grid=(get_vectorcore_num()//2,)')\nprint()\nprint('实际并行度对比:')\nprint('  Case1 (B=1,H=8):  当前8个程序 vs 应有20个程序')\nprint('  Case2 (B=1,H=16): 当前16个程序 vs 应有20个程序')\nprint()\nprint('影响: 最多只使用了40%(8/20)的计算核心!')\nprint()\n\nprint('## BOTTLENECK 2: 大量使用 tl.load with other=0.0 参数')\nprint('-' * 60)\nprint('违规的 tl.load 调用:')\nprint('  Line 91:  tl.load(ptr_h0_bv1, mask=mask_kv1, other=0.0) - h0初始状态')\nprint('  Line 94:  tl.load(ptr_h0_bv2, mask=mask_kv2, other=0.0) - h0初始状态')\nprint('  Line 112: tl.load(ptr_w, mask=mask_w, other=0.0)         - w权重')\nprint('  Line 126: tl.load(g_ptr + offs_t, mask=mask_t, other=0.0) - g门控')\nprint('  Line 136: tl.load(ptr_v1, mask=mask_v1, other=0.0)        - v1特征')\nprint('  Line 153: tl.load(ptr_v2, mask=mask_v2, other=0.0)        - v2特征')\nprint()\nprint('问题: other参数内部触发tl.where操作，导致当前load操作')\nprint('      无法与后续load并行执行，降低了访存并行性')\nprint()\n\nprint('## BOTTLENECK 3: UB使用量严重超限')\nprint('-' * 60)\nprint('当前UB峰值使用量: ~224.5 KB')\nprint('可用UB上限(50%): 96 KB')\nprint('超出限制: 2.34倍!')\nprint()\nprint('持久变量(跨迭代):')\nprint('  b_h1_bv1: [128, 64] f32 = 32 KB')\nprint('  b_h1_bv2: [128, 64] f32 = 32 KB')\nprint('  小计: 64 KB (已超可用50%上限!)')\nprint()\nprint('单次迭代临时变量:')\nprint('  b_w:      [128, 128] bf16 = 32 KB')\nprint('  b_k:      [128, 128] bf16 = 32 KB')\nprint('  b_v1:     [128,  64] bf16 = 16 KB')\nprint('  b_v2:     [128,  64] bf16 = 16 KB')  \nprint('  b_v_new1: [128,  64] f32  = 32 KB')\nprint('  b_v_new2: [128,  64] f32  = 32 KB')\nprint('  b_g:      [128]      f32  = 0.5 KB')\nprint('  小计: ~160.5 KB')\nprint()\nprint('超出UB限制会导致: 频繁的内存溢出换入换出,严重降低性能')\nprint()\n\nprint('## BOTTLENECK 4: 每个程序处理所有chunk块 - 访存密集')\nprint('-' * 60)\nprint('当前: 每个 (n,h) 对应一个程序，该程序串行处理所有NT个chunk')\nprint(f'  NT = 81 (T=10288, BT=128)')\nprint('每次chunk迭代:')\nprint('  - 写入 h: 2x [K=128, V=64] = 2x 128*64 elements')\nprint('  - 读取 w: [BT=128, K=128]')\nprint('  - 读取 k: [K=128, BT=128]')\nprint('  - 读取 v1,v2: 2x [BT=128, 64]')\nprint('  - 读取 g: [BT=128]')\nprint('  - 写入 v_new1,v2: 2x [BT=128, 64]')\nprint('总IO: NT * (loads + stores) = 81次大块访存操作')\nprint()\n\nprint('## BOTTLENECK 5: 循环内包含重复的标量计算')\nprint('-' * 60)\nprint('Line 120: last_idx = min((i_t + 1) * BT, T) - 1')\nprint('  min()是Python的cpu标量操作，在Triton kernel内部会导致低效')\nprint()\nprint('Line 56: T_max = 1 * T  (无意义的乘以1)')\nprint()\nprint('Lines 131/106: offs_t_wv 和 offs_t_v 独立计算 arange，可合并')\nprint('  offs_t_wv = (i_t * BT + tl.arange(0, BT))[:, None]  # Line 106')\nprint('  offs_t_v  = (i_t * BT + tl.arange(0, BT))[:, None]  # Line 131')\nprint('  => 相同的计算做了两次')\nprint()\n\nprint('## BOTTLENECK 6: 循环结构中v1和v2计算未优化交织')\nprint('-' * 60)\nprint('当前执行顺序:')\nprint('  1. 加载 b_w, b_k, b_v1, b_g (所有读操作)')  \nprint('  2. 计算 b_v_new1 = b_v1 - dot(b_w, b_h1_bv1)')\nprint('  3. 存储 v_new1')\nprint('  4. 更新 b_h1_bv1 += dot(b_k, b_v_new1)')\nprint('  5. 加载 b_v2')\nprint('  6. 计算 b_v_new2 = b_v2 - dot(b_w, b_h1_bv2)')\nprint('  7. 存储 v_new2')\nprint('  8. 更新 b_h1_bv2 += dot(b_k, b_v_new2)')\nprint()\nprint('b_v2的加载(Step5)本可以与b_v1的计算(Step2)并行,但未做到')\nprint()\n\nprint()\nprint('## 优先级排序')\nprint('=' * 60)\nprint('P0 [致命] BOTTLENECK 1: Grid设计错误 -> 仅使用40%-80%计算核心')\nprint('P1 [严重] BOTTLENECK 3: UB超限 -> 2.34倍超限导致内存换入换出')\nprint('P2 [重要] BOTTLENECK 2: tl.load with other -> 访存并行性降低')\nprint('P3 [中等] BOTTLENECK 5: 循环内重复计算 -> CPU-NPU同步开销')\nprint('P4 [中等] BOTTLENECK 4: 单程序处理所有chunk -> 访存密集')\nprint('P5 [轻微] BOTTLENECK 6: v1/v2计算未交织 -> 流水线未利用')\n\" 2>&1",
+  "description": "Generate complete performance bottleneck analysis"
+}
+```
+
+**Output:**
+```
+======================================================
+PERFORMANCE BOTTLENECK ANALYSIS SUMMARY
+======================================================
+
+## BOTTLENECK 1: Grid设计违反规范 - 最严重问题
+------------------------------------------------------------
+当前: def grid(meta): return (1, N * H)
+问题1: 使用了2D grid (1, N*H) 而不是1D grid
+问题2: grid大小与输入数据形状关联 (N*H是动态值)
+问题3: 对于含有tl.dot的Kernel，应使用 grid=(get_vectorcore_num()//2,)
+
+实际并行度对比:
+  Case1 (B=1,H=8):  当前8个程序 vs 应有20个程序
+  Case2 (B=1,H=16): 当前16个程序 vs 应有20个程序
+
+影响: 最多只使用了40%(8/20)的计算核心!
+
+## BOTTLENECK 2: 大量使用 tl.load with other=0.0 参数
+------------------------------------------------------------
+违规的 tl.load 调用:
+  Line 91:  tl.load(ptr_h0_bv1, mask=mask_kv1, other=0.0) - h0初始状态
+  Line 94:  tl.load(ptr_h0_bv2, mask=mask_kv2, other=0.0) - h0初始状态
+  Line 112: tl.load(ptr_w, mask=mask_w, other=0.0)         - w权重
+  Line 126: tl.load(g_ptr + offs_t, mask=mask_t, other=0.0) - g门控
+  Line 136: tl.load(ptr_v1, mask=mask_v1, other=0.0)        - v1特征
+  Line 153: tl.load(ptr_v2, mask=mask_v2, other=0.0)        - v2特征
+
+问题: other参数内部触发tl.where操作，导致当前load操作
+      无法与后续load并行执行，降低了访存并行性
+
+## BOTTLENECK 3: UB使用量严重超限
+------------------------------------------------------------
+当前UB峰值使用量: ~224.5 KB
+可用UB上限(50%): 96 KB
+超出限制: 2.34倍!
+
+持久变量(跨迭代):
+  b_h1_bv1: [128, 64] f32 = 32 KB
+  b_h1_bv2: [128, 64] f32 = 32 KB
+  小计: 64 KB (已超可用50%上限!)
+
+单次迭代临时变量:
+  b_w:      [128, 128] bf16 = 32 KB
+  b_k:      [128, 128] bf16 = 32 KB
+  b_v1:     [128,  64] bf16 = 16 KB
+  b_v2:     [128,  64] bf16 = 16 KB
+  b_v_new1: [128,  64] f32  = 32 KB
+  b_v_new2: [128,  64] f32  = 32 KB
+  b_g:      [128]      f32  = 0.5 KB
+  小计: ~160.5 KB
+
+超出UB限制会导致: 频繁的内存溢出换入换出,严重降低性能
+
+## BOTTLENECK 4: 每个程序处理所有chunk块 - 访存密集
+------------------------------------------------------------
+当前: 每个 (n,h) 对应一个程序，该程序串行处理所有NT个chunk
+  NT = 81 (T=10288, BT=128)
+每次chunk迭代:
+  - 写入 h: 2x [K=128, V=64] = 2x 128*64 elements
+  - 读取 w: [BT=128, K=128]
+  - 读取 k: [K=128, BT=128]
+  - 读取 v1,v2: 2x [BT=128, 64]
+  - 读取 g: [BT=128]
+  - 写入 v_new1,v2: 2x [BT=128, 64]
+总IO: NT * (loads + stores) = 81次大块访存操作
+
+## BOTTLENECK 5: 循环内包含重复的标量计算
+------------------------------------------------------------
+Line 120: last_idx = min((i_t + 1) * BT, T) - 1
+  min()是Python的cpu标量操作，在Triton kernel内部会导致低效
+
+Line 56: T_max = 1 * T  (无意义的乘以1)
+
+Lines 131/106: offs_t_wv 和 offs_t_v 独立计算 arange，可合并
+  offs_t_wv = (i_t * BT + tl.arange(0, BT))[:, None]  # Line 106
+  offs_t_v  = (i_t * BT + tl.arange(0, BT))[:, None]  # Line 131
+  => 相同的计算做了两次
+
+## BOTTLENECK 6: 循环结构中v1和v2计算未优化交织
+------------------------------------------------------------
+当前执行顺序:
+  1. 加载 b_w, b_k, b_v1, b_g (所有读操作)
+  2. 计算 b_v_new1 = b_v1 - dot(b_w, b_h1_bv1)
+  3. 存储 v_new1
+  4. 更新 b_h1_bv1 += dot(b_k, b_v_new1)
+  5. 加载 b_v2
+  6. 计算 b_v_new2 = b_v2 - dot(b_w, b_h1_bv2)
+  7. 存储 v_new2
+  8. 更新 b_h1_bv2 += dot(b_k, b_v_new2)
+
+b_v2的加载(Step5)本可以与b_v1的计算(Step2)并行,但未做到
+
+
+## 优先级排序
+============================================================
+P0 [致命] BOTTLENECK 1: Grid设计错误 -> 仅使用40%-80%计算核心
+P1 [严重] BOTTLENECK 3: UB超限 -> 2.34倍超限导致内存换入换出
+P2 [重要] BOTTLENECK 2: tl.load with other -> 访存并行性降低
+P3 [中等] BOTTLENECK 5: 循环内重复计算 -> CPU-NPU同步开销
+P4 [中等] BOTTLENECK 4: 单程序处理所有chunk -> 访存密集
+P5 [轻微] BOTTLENECK 6: v1/v2计算未交织 -> 流水线未利用
+
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 8.3s)
+
+**Tool: todowrite**
+
+**Input:**
+```json
+{
+  "todos": [
+    {
+      "content": "记录基线性能数据",
+      "priority": "high",
+      "status": "completed"
+    },
+    {
+      "content": "深度分析代码性能瓶颈",
+      "priority": "high",
+      "status": "completed"
+    },
+    {
+      "content": "输出性能瓶颈分析报告",
+      "priority": "high",
+      "status": "in_progress"
+    }
+  ]
+}
+```
+
+**Output:**
+```
+[
+  {
+    "content": "记录基线性能数据",
+    "priority": "high",
+    "status": "completed"
+  },
+  {
+    "content": "深度分析代码性能瓶颈",
+    "priority": "high",
+    "status": "completed"
+  },
+  {
+    "content": "输出性能瓶颈分析报告",
+    "priority": "high",
+    "status": "in_progress"
+  }
+]
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 49.6s)
+
+---
+
+## 性能瓶颈分析报告
+
+### 基线性能数据
+
+| Shape | dtype | Task Duration | TFLOPS |
+|-------|-------|--------------|--------|
+| 1,10288,2,128; H=8, K=128, V=128 | bfloat16 | **0.81 ms** | 3.32 |
+| 1,10288,2,128; H=8, K=128, V=128 | float32 | **0.95 ms** | 2.82 |
+| 1,10012,4,128; H=16, K=128, V=128 | bfloat16 | **0.85 ms** | 6.17 |
+| 1,10012,4,128; H=16, K=128, V=128 | float32 | **0.99 ms** | 5.32 |
+| 1,10016,2,128; H=8, K=128, V=128 | bfloat16 | **0.79 ms** | 3.31 |
+| 1,10016,2,128; H=8, K=128, V=128 | float32 | **0.93 ms** | 2.83 |
+
+---
+
+### 性能瓶颈详细分析
+
+---
+
+#### 🔴 P0【致命】瓶颈1：Grid 设计违反规范，核心利用率极低
+
+**当前代码（chunk_delta_h.py, line 220-221）：**
+```python
+def grid(meta):
+    return (1, N * H)
+```
+
+**问题剖析：**
+- **违反固定 Grid 规范**：`N * H` 随输入数据形状动态变化，违反了"Grid 大小必须使用固定大小"的核心规范
+- **使用 2D Grid**：当前使用 `(1, N*H)` 的 2D grid，应优先使用 1D grid
+- **含有 `tl.dot` 的 Kernel**，必须使用 `grid = (get_vectorcore_num() // 2,)` = `(20,)`
+- **核心利用率极低**：
+  - Case1 (B=1, H=8)：当前仅启动 **8** 个程序，而 NPU 有 **20** 个可用 Cube 核心 → 利用率仅 **40%**
+  - Case2 (B=1, H=16)：当前启动 **16** 个程序 → 利用率仅 **80%**
+- 每个程序独自串行处理全部 NT=81 个 chunk，无法发挥多核并行优势
+
+**应改为：**
+```python
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton, get_vectorcore_num
+init_device_properties_triton()
+grid = (get_vectorcore_num() // 2,)  # = (20,)，固定大小
+```
+
+---
+
+#### 🔴 P1【严重】瓶颈2：UB（Unified Buffer）使用量严重超限（2.34倍）
+
+**UB 使用量计算（BT=128, K=128, V=128, bf16/f32）：**
+
+| 变量 | Shape | 类型 | 大小 |
+|------|-------|------|------|
+| `b_h1_bv1`（持久） | [128, 64] | f32 | 32 KB |
+| `b_h1_bv2`（持久） | [128, 64] | f32 | 32 KB |
+| `b_w` | [128, 128] | bf16 | 32 KB |
+| `b_k` | [128, 128] | bf16 | 32 KB |
+| `b_v1` | [128, 64] | bf16 | 16 KB |
+| `b_v2` | [128, 64] | bf16 | 16 KB |
+| `b_v_new1` | [128, 64] | f32 | 32 KB |
+| `b_v_new2` | [128, 64] | f32 | 32 KB |
+| `b_g` | [128] | f32 | 0.5 KB |
+| **峰值合计** | | | **224.5 KB** |
+
+- **可用 UB 上限**（含 Double Buffering 50% 裕量）：`192 KB × 50% = 96 KB`
+- **超限量**：224.5 KB / 96 KB = **2.34 倍**
+- **影响**：超限会触发 UB 换入换出（spill to GM），每次溢出都需要额外的 GM 访存，大幅增加延迟
+
+---
+
+#### 🟠 P2【重要】瓶颈3：大量 `tl.load` 使用 `other=0.0` 参数
+
+**违规位置（共6处）：**
+```python
+# Line 91-94: 初始状态加载
+tl.load(ptr_h0_bv1, mask=mask_kv1, other=0.0)
+tl.load(ptr_h0_bv2, mask=mask_kv2, other=0.0)
+
+# Line 112: w 权重加载（循环内，每次迭代执行）
+b_w = tl.load(ptr_w, mask=mask_w, other=0.0)
+
+# Line 126: g 门控加载（循环内）
+b_g = tl.load(g_ptr + offs_t, mask=mask_t, other=0.0)
+
+# Line 136, 153: v1/v2 特征加载（循环内，每次迭代执行2次）
+b_v1 = tl.load(ptr_v1, mask=mask_v1, other=0.0)
+b_v2 = tl.load(ptr_v2, mask=mask_v2, other=0.0)
+```
+
+**影响：** `other` 参数内部会触发 `tl.where` 操作，导致该 `tl.load` 无法与后续 load 操作并行，降低了访存吞吐量和 MTE 流水线利用率
+
+**正确做法：** 先无 mask 执行 `tl.load`，再用 `tl.where` 配合 mask 组合：
+```python
+# 当前（低效）
+b_w = tl.load(ptr_w, mask=mask_w, other=0.0)
+# 应改为
+b_w = tl.load(ptr_w, mask=mask_w)
+b_w = tl.where(mask_w, b_w, 0.0)
+```
+
+---
+
+#### 🟡 P3【中等】瓶颈4：循环内存在重复计算和冗余标量操作
+
+**问题1：相同 arange 偏移量重复计算两次（lines 106, 131）：**
+```python
+offs_t_wv = (i_t * BT + tl.arange(0, BT))[:, None]  # Line 106
+# ...中间有其他计算...
+offs_t_v = (i_t * BT + tl.arange(0, BT))[:, None]   # Line 131 （完全相同！）
+```
+
+**问题2：无意义的乘法（line 56）：**
+```python
+T_max = 1 * T   # 等价于 T_max = T，多余操作
+```
+
+**问题3：循环内使用 Python 内置 `min()` 引发标量同步（line 120）：**
+```python
+last_idx = min((i_t + 1) * BT, T) - 1  # Python min() 是标量运算，在 kernel 内低效
+```
+应改用 `tl.minimum()` 替代。
+
+---
+
+#### 🟡 P4【中等】瓶颈5：v1 和 v2 的计算串行执行，计算流水线未充分利用
+
+**当前执行顺序（循环内）：**
+1. 加载 `b_w`, `b_k`, `b_v1`, `b_g` → **所有读先完成**
+2. 计算 `b_v_new1 -= dot(b_w, b_h1_bv1)`
+3. 存储 `v_new1`（如需要）
+4. 更新 `b_h1_bv1 += dot(b_k, b_v_new1)`
+5. **此时才**加载 `b_v2`（延迟！）
+6. 计算 `b_v_new2 -= dot(b_w, b_h1_bv2)`
+7. 存储 `v_new2`
+8. 更新 `b_h1_bv2 += dot(b_k, b_v_new2)`
+
+**优化建议：** `b_v2` 的加载（Step 5）可提前到 Step 1 阶段与其他 load 合并，利用 MTE/Vector 流水线并行隐藏访存延迟
+
+---
+
+### 瓶颈优先级汇总
+
+| 优先级 | 瓶颈 | 影响程度 | 核心原因 |
+|--------|------|---------|---------|
+| 🔴 P0 | Grid 设计错误 | **核心利用率 40%-80%** | `grid=(1, N*H)` 不固定且只使用了 2D grid |
+| 🔴 P1 | UB 超限 2.34x | **严重内存换入换出** | 持久+临时变量共 224.5 KB，超出 96 KB 限制 |
+| 🟠 P2 | `tl.load` with `other` | **访存并行性降低** | 6 处 load 触发内部 `tl.where`，阻断 MTE 并行 |
+| 🟡 P3 | 循环内重复计算 | **增加额外指令开销** | `arange` 重复、无意义乘法、Python `min()` |
+| 🟡 P4 | v1/v2 串行计算 | **流水线利用不足** | `b_v2` load 延迟，未与 `b_v1` 计算并行 |
+
+---
+
+**最高优先级优化方向**：修正 Grid 为固定 `(get_vectorcore_num()//2,)`，同时重构 Kernel 内部的负载均衡逻辑（每个程序通过 `pid` 动态计算负责的 `(n, h)` 对和 chunk 范围），可期望带来最大性能提升。
+
+<promise>分析出算子性能瓶颈</promise>
+
+---
+
+## User
+
+[SYSTEM DIRECTIVE: OH-MY-OPENCODE - RALPH LOOP 2/100]
+
+Your previous attempt did not output the completion promise. Continue working on the task.
+
+IMPORTANT:
+- Review your progress so far
+- Continue from where you left off
+- When FULLY complete, output: <promise>DONE</promise>
+- Do not stop until the task is truly done
+
+Original task:
+使用 Skill /triton-ascend-ops-optimizer 分析 Triton 算子代码存在的性能问题：/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/chunk_delta_h.py。性能测试用 ASCEND_RT_VISIBLE_DEVICES="4" python3 /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/benchmark_delta_h.py。--max-iterations 25
+<!-- OMO_INTERNAL_INITIATOR -->
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 14.8s)
+
+_Thinking:_
+
+The task has been completed. I already output the completion promise `<promise>分析出算子性能瓶颈</promise>` at the end of my previous response. The analysis is complete and comprehensive.
+
+Let me re-read the task - the completion promise was "分析出算子性能瓶颈" and I already output that. The loop system might not have recognized it properly because it was embedded in a larger response with the analysis report.
+
+Let me output the completion promise again clearly.
+
+任务已完成。上一轮迭代中我已完成了全部分析工作，并输出了完成承诺 `<promise>分析出算子性能瓶颈</promise>`。以下是完整分析结果的摘要确认：
+
+## ✅ 分析完成确认
+
+### 基线性能（已测量）
+| Shape | dtype | Task Duration |
+|-------|-------|--------------|
+| B=1, T=10288, H=8 | bfloat16 | 0.81 ms |
+| B=1, T=10288, H=8 | float32 | 0.95 ms |
+| B=1, T=10012, H=16 | bfloat16 | 0.85 ms |
+| B=1, T=10012, H=16 | float32 | 0.99 ms |
+
+### 已识别的5大性能瓶颈
+
+| 优先级 | 瓶颈 | 影响 |
+|--------|------|------|
+| 🔴 P0 | `grid=(1, N*H)` 违反固定Grid规范，含`tl.dot`应用`(get_vectorcore_num()//2,)=(20,)` | 核心利用率仅40%-80% |
+| 🔴 P1 | UB使用量224.5 KB，超出96 KB限制2.34倍 | 触发大量内存换入换出 |
+| 🟠 P2 | 6处`tl.load(other=0.0)`内部触发`tl.where` | 阻断MTE访存并行 |
+| 🟡 P3 | 循环内重复计算arange、无意义`T_max=1*T`、Python `min()`标量 | 额外指令和同步开销 |
+| 🟡 P4 | b_v2加载延迟，未与b_v1计算流水并行 | 计算流水线利用不足 |
+
+<promise>分析出算子性能瓶颈</promise>
+
+---
+
+## User
+
+[SYSTEM DIRECTIVE: OH-MY-OPENCODE - RALPH LOOP 3/100]
+
+Your previous attempt did not output the completion promise. Continue working on the task.
+
+IMPORTANT:
+- Review your progress so far
+- Continue from where you left off
+- When FULLY complete, output: <promise>DONE</promise>
+- Do not stop until the task is truly done
+
+Original task:
+使用 Skill /triton-ascend-ops-optimizer 分析 Triton 算子代码存在的性能问题：/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/chunk_delta_h.py。性能测试用 ASCEND_RT_VISIBLE_DEVICES="4" python3 /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/benchmark_delta_h.py。--max-iterations 25
+<!-- OMO_INTERNAL_INITIATOR -->
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 5.6s)
+
+_Thinking:_
+
+The task is complete - I've analyzed the performance bottlenecks. The completion promise I need to output is "分析出算子性能瓶颈" based on the original task specification `--completion-promise "分析出算子性能瓶颈"`. Let me output it clearly.
+
+分析已完全完成。所有性能瓶颈均已识别并记录。
+
+<promise>分析出算子性能瓶颈</promise>
+
+---
+
+## User
+
+[SYSTEM DIRECTIVE: OH-MY-OPENCODE - RALPH LOOP 4/100]
+
+Your previous attempt did not output the completion promise. Continue working on the task.
+
+IMPORTANT:
+- Review your progress so far
+- Continue from where you left off
+- When FULLY complete, output: <promise>DONE</promise>
+- Do not stop until the task is truly done
+
+Original task:
+使用 Skill /triton-ascend-ops-optimizer 分析 Triton 算子代码存在的性能问题：/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/chunk_delta_h.py。性能测试用 ASCEND_RT_VISIBLE_DEVICES="4" python3 /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/benchmark_delta_h.py。--max-iterations 25
+<!-- OMO_INTERNAL_INITIATOR -->
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 6.8s)
+
+_Thinking:_
+
+The system keeps saying my previous attempt didn't output the completion promise. I've been outputting `<promise>分析出算子性能瓶颈</promise>` but the loop system seems to be looking for `<promise>DONE</promise>` based on the IMPORTANT section. Let me output `<promise>DONE</promise>` this time.
+
+分析已完成。输出标准完成标记：
+
+<promise>DONE</promise>
+
+---
+
+## User
+
+[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION]
+
+Incomplete tasks remain in your todo list. Continue working on the next pending task.
+
+- Proceed without asking for permission
+- Mark each task complete when finished
+- Do not stop until all tasks are done
+- If you believe all work is already complete, the system is questioning your completion claim. Critically re-examine each todo item from a skeptical perspective, verify the work was actually done correctly, and update the todo list accordingly.
+
+[Status: 2/3 completed, 1 remaining]
+
+Remaining tasks:
+- [in_progress] 输出性能瓶颈分析报告
+<!-- OMO_INTERNAL_INITIATOR -->
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 5.8s)
+
+_Thinking:_
+
+The system is asking me to complete the remaining todo item "输出性能瓶颈分析报告". I've already done this analysis, but let me mark it as completed properly.
+
+**Tool: todowrite**
+
+**Input:**
+```json
+{
+  "todos": [
+    {
+      "content": "记录基线性能数据",
+      "priority": "high",
+      "status": "completed"
+    },
+    {
+      "content": "深度分析代码性能瓶颈",
+      "priority": "high",
+      "status": "completed"
+    },
+    {
+      "content": "输出性能瓶颈分析报告",
+      "priority": "high",
+      "status": "completed"
+    }
+  ]
+}
+```
+
+**Output:**
+```
+[
+  {
+    "content": "记录基线性能数据",
+    "priority": "high",
+    "status": "completed"
+  },
+  {
+    "content": "深度分析代码性能瓶颈",
+    "priority": "high",
+    "status": "completed"
+  },
+  {
+    "content": "输出性能瓶颈分析报告",
+    "priority": "high",
+    "status": "completed"
+  }
+]
+```
+
+---
+
+## Assistant (Sisyphus (Ultraworker) · claude-sonnet-4-6-thinking · 42.5s)
+
+性能瓶颈分析报告已在第1轮迭代中完整输出。以下是最终完整报告：
+
+---
+
+## 优化结果报告（分析阶段）
+
+### 算子信息
+- **算子名称**：`chunk_gated_delta_rule_fwd_kernel_h_blockdim64`
+- **源文件**：`/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/chunk_delta_h.py`
+
+### 基线性能
+
+| Shape (B,T,Hg,K; B,T,H,K; B,T,H,V; B,H,T) | dtype | Task Duration (ms) | TFLOPS |
+|---|---|---|---|
+| 1,10288,2,128; H=8, V=128 | bfloat16 | 0.81 | 3.32 |
+| 1,10288,2,128; H=8, V=128 | float32 | 0.95 | 2.82 |
+| 1,10012,4,128; H=16, V=128 | bfloat16 | 0.85 | 6.17 |
+| 1,10012,4,128; H=16, V=128 | float32 | 0.99 | 5.32 |
+| 1,10016,2,128; H=8, V=128 | bfloat16 | 0.79 | 3.31 |
+| 1,10016,2,128; H=8, V=128 | float32 | 0.93 | 2.83 |
+
+---
+
+### 已识别性能瓶颈（按优先级排列）
+
+#### 🔴 瓶颈1 [P0 致命]：Grid 设计违反规范，核心利用率极低
+
+**位置**：`chunk_delta_h.py` Line 220-221
+
+```python
+# 当前（错误）
+def grid(meta):
+    return (1, N * H)
+
+# 应改为（正确）
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton, get_vectorcore_num
+init_device_properties_triton()
+grid = (get_vectorcore_num() // 2,)  # = (20,)，固定大小，因含 tl.dot
+```
+
+**问题**：
+1. Grid 大小 `N*H` 随输入动态变化，违反"必须使用固定大小"规范
+2. 使用 2D grid `(1, N*H)`，应优先使用 1D grid
+3. 含 `tl.dot` 的 Kernel 必须使用 `grid = (get_vectorcore_num() // 2,) = (20,)`
+
+**核心利用率**：
+- Case1 (B=1, H=8)：当前 **8** 程序 / NPU **20** 个 Cube 核心 → 利用率仅 **40%**
+- Case2 (B=1, H=16)：当前 **16** 程序 / NPU **20** 个 Cube 核心 → 利用率仅 **80%**
+
+---
+
+#### 🔴 瓶颈2 [P1 严重]：UB（Unified Buffer）使用量超限 **2.34 倍**
+
+**UB 占用分析（BT=128, K=128, V=128）**：
+
+| 变量 | Shape | 类型 | 大小 |
+|------|-------|------|------|
+| `b_h1_bv1`（持久跨迭代） | [128, 64] | f32 | 32 KB |
+| `b_h1_bv2`（持久跨迭代） | [128, 64] | f32 | 32 KB |
+| `b_w`（循环内临时） | [128, 128] | bf16 | 32 KB |
+| `b_k`（循环内临时） | [128, 128] | bf16 | 32 KB |
+| `b_v1`（循环内临时） | [128, 64] | bf16 | 16 KB |
+| `b_v2`（循环内临时） | [128, 64] | bf16 | 16 KB |
+| `b_v_new1`（循环内临时） | [128, 64] | f32 | 32 KB |
+| `b_v_new2`（循环内临时） | [128, 64] | f32 | 32 KB |
+| `b_g`（循环内临时） | [128] | f32 | 0.5 KB |
+| **峰值合计** | | | **224.5 KB** |
+
+- 可用 UB 上限（含 Double Buffering 50% 裕量）：`192 KB × 50% = 96 KB`
+- **超限 2.34 倍** → 触发 UB 溢出换入换出 GM，大幅增加访存延迟
+
+---
+
+#### 🟠 瓶颈3 [P2 重要]：6 处 `tl.load` 使用 `other=0.0`，阻断 MTE 访存并行
+
+**违规位置**：
+
+| 行号 | 代码 | 场景 |
+|------|------|------|
+| Line 91 | `tl.load(ptr_h0_bv1, mask=mask_kv1, other=0.0)` | 初始状态加载 |
+| Line 94 | `tl.load(ptr_h0_bv2, mask=mask_kv2, other=0.0)` | 初始状态加载 |
+| Line 112 | `tl.load(ptr_w, mask=mask_w, other=0.0)` | w 权重（**每次循环**） |
+| Line 126 | `tl.load(g_ptr + offs_t, mask=mask_t, other=0.0)` | g 门控（**每次循环**） |
+| Line 136 | `tl.load(ptr_v1, mask=mask_v1, other=0.0)` | v1 特征（**每次循环**） |
+| Line 153 | `tl.load(ptr_v2, mask=mask_v2, other=0.0)` | v2 特征（**每次循环**） |
+
+`other` 参数内部触发 `tl.where`，导致该 `tl.load` 无法与后续 load 操作并行，每次循环产生 4 次阻塞点。
+
+---
+
+#### 🟡 瓶颈4 [P3 中等]：循环内重复计算与冗余标量操作
+
+1. **重复计算 `arange` 偏移量两次**（Lines 106 & 131）：
+```python
+offs_t_wv = (i_t * BT + tl.arange(0, BT))[:, None]  # Line 106
+offs_t_v  = (i_t * BT + tl.arange(0, BT))[:, None]  # Line 131 ← 完全相同，冗余！
+```
+
+2. **无意义乘法**（Line 56）：
+```python
+T_max = 1 * T   # 等价于 T_max = T，多余操作
+```
+
+3. **Python 内置 `min()` 在 kernel 内引发标量运算**（Line 120）：
+```python
+last_idx = min((i_t + 1) * BT, T) - 1   # 应改用 tl.minimum()
+```
+
+---
+
+#### 🟡 瓶颈5 [P4 中等]：v1 和 v2 计算串行，MTE/Vector 流水线未充分利用
+
+当前 `b_v2` 的加载（Line 152-153）发生在 `b_v1` 完整计算+存储+更新 h 之后，未能与 `b_v1` 的计算阶段并行流水。将 `b_v2` 的 load 提前至循环入口处（与 `b_w`, `b_k`, `b_v1` 一起加载）可隐藏访存延迟。
+
+---
+
+### 优化技术清单（待实施）
+
+1. `[ ]` 修正 Grid 为固定 `(get_vectorcore_num() // 2,)`，kernel 内通过 pid 分配 `(n, h)` 和 chunk 范围
+2. `[ ]` 拆分 kernel 或减小 BT 以将 UB 峰值控制在 96 KB 以内
+3. `[ ]` 将所有 `tl.load(other=0.0)` 替换为无 other 的 load + 独立 `tl.where`
+4. `[ ]` 合并重复 `arange` 计算，移除 `T_max = 1 * T`，用 `tl.minimum` 替代 `min()`
+5. `[ ]` 将 `b_v2` 的 load 前移，与 v1 计算并行流水
+
+<promise>DONE</promise>
+
+---
+
