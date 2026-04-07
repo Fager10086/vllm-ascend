@@ -1,0 +1,21 @@
+七、已应用的全部优化技术
+
+  1. ✅ 固定 Grid = get_vectorcore_num() — 遵循规范，grid=(40,)
+  2. ✅ 多 Token 并行处理 N=7 — UB 规划：85KB // 12KB = 7 blocks/iter
+  3. ✅ 预计算模块级常量 — _GRID, _BLOCK_SIZE 消除每次调用的 Python 计算
+  4. ✅ tl.static_range — 编译期展开内循环
+  5. ✅ do_not_specialize — 防止 n_elements 变化触发重编译
+  6. ✅ 消除 lambda grid — 固定 tuple 替代 lambda 分派
+  7. ✅ full/tail block 分离 — full blocks 不用 mask 的 load
+  8. ✅ BLOCK_SIZE 全面调参 — 256/512/1024/2048/4096/8192 逐一测试
+  9. ✅ specialize vs do_not_specialize — 两种模式对比验证
+  10. ✅ kernel launch 方式 — [grid]() vs .run() vs pre-bound
+
+  最终结论：该算子在当前数据规模和测试方式下，kernel 计算时间已达 GM 
+  带宽硬件极限，Triton 端到端开销中 kernel launch 占比过大，2x 
+  加速目标超出了物理可达范围。
+
+
+
+  人工review：
+  当前Grid分核能够主动分为vector num，但是UB未吃满，每次迭代处理的block_size太小
