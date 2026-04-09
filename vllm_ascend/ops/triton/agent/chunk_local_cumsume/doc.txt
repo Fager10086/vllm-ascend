@@ -1,0 +1,2299 @@
+╭─── Claude Code v2.1.96 ──────────────────────────────────────────────────────╮
+│                                    │ Tips for getting started                │
+│            Welcome back!           │ Run /init to create a CLAUDE.md file w… │
+│                                    │ ─────────────────────────────────────── │
+│               ▐▛███▜▌              │ Recent activity                         │
+│              ▝▜█████▛▘             │ No recent activity                      │
+│                ▘▘ ▝▝               │                                         │
+│                                    │                                         │
+│   Sonnet 4.6 · API Usage Billing   │                                         │
+│          /vllm-workspace           │                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+❯ 使用 Skill /vector-triton-ascend-ops-optimizer 实现 Vector 类 Triton          
+  算子性能优化：/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.p 
+  y。精度与功能正确性验证用 python -m pytest                                    
+  /vllm-workspace/test_chunk/test_cumseum.py；性能测试用 python                 
+  /vllm-workspace/test_chunk/test_cumsum_perf.py。性能提升必须达成 1.3          
+  倍以上，且越高越好。                                                          
+
+● I'll start by invoking the Triton Ascend ops optimizer skill to optimize the
+  cumsum operator.
+
+● Skill(triton-ascend-ops-optimizer)
+  ⎿  Successfully loaded skill
+
+● 我将按照 Triton Ascend 算子优化技能的工作流程，对 cumsum
+  算子进行深度性能优化。让我从环境配置和基线分析开始。
+
+● 步骤 0：环境配置
+
+● Bash(export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/A
+      scend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH
+      && source /us…)
+  ⎿  环境配置完成
+
+● 步骤 1：读取和分析算子源码与测试代码
+
+  Read 3 files (ctrl+o to expand)
+  ⎿  Loaded vllm-ascend/CLAUDE.md
+
+● Now let me read the utility files and understand the helper functions:
+
+  Read 2 files (ctrl+o to expand)
+
+● Now let me read the reference documents for optimization guidance:
+
+  Read 2 files (ctrl+o to expand)
+
+● Now I have a thorough understanding of the codebase. Let me run the baseline
+  tests:
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/)
+  ⎿  Done
+
+● Bash(export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/A
+      scend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH
+      && source /us…)
+  ⎿  ============================= test session starts ====================
+     ==========
+     platform linux -- Python 3.11.14, pytest-9.0.3, pluggy-1.6.0 -- /usr/l
+     … +39 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 基线正确性验证通过。现在运行基线性能测试：
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/)
+  ⎿  Done
+
+● Bash(export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/A
+      scend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH
+      && source /us…)
+  ⎿  INFO 04-08 12:03:09 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:03:09 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +6 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 再运行两次确认基线稳定性：
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:04:25 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:04:25 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +6 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:05:33 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:05:33 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +6 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 基线性能记录：三次测试结果分别为 0.715 ms、0.842 ms、0.764 ms，取平均值 ~0.774
+   ms 作为基线。
+
+  现在让我备份原始代码并深入分析算子，开始优化。
+● Bash(cp /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py.bak)
+  ⎿  Done
+
+● 现在让我查看 NPU 的核心数量：
+
+● Bash(export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/A
+      scend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH
+      && source /us…)
+  ⎿  INFO 04-08 12:07:18 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:07:18 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+
+● 很好。现在让我深度分析算子的优化方向：
+
+  算子分析：
+  - 输入 g: shape (1, T_total, H) 其中 T_total ≈ 10288, H=8, dtype=float32
+  - 这是一个纯 Vector 算子（无 tl.dot），Grid 应使用 (get_vectorcore_num(), ) =
+  (40, )
+  - 原始 Grid 为 (num_blocks, B) = 2D Grid，且 num_blocks 与数据形状相关
+
+  原始算子的性能瓶颈：
+  1. Grid 大小与数据形状相关：grid = (num_blocks, B) 中 num_blocks =
+  triton.cdiv(T, OPTIM_BLOCK_SIZE)，违反固定 Grid 大小要求
+  2. 每个核只处理一个 block：没有批量处理多个 Tokens
+  3. 使用了 make_block_ptr 和 tl.trans/tl.reshape：大量 reshape/transpose 操作
+  4. OPTIM_BLOCK_SIZE 计算：(2**18) // (H * chunk_size) = 262144 // (8 * 64) =
+  512
+  5. 数据格式：(T, H) 即 (BLOCK_T, H) = (512, 8)，先 reshape 为 (N_CHUNKS, 
+  CHUNK_SIZE, H) = (8, 64, 8)，再 transpose 为 (64, 8, 8)，然后 cumsum axis=0
+
+  优化策略：
+  1. 使用固定 Grid = (get_vectorcore_num(), ) = (40, )
+  2. 每个核通过循环处理多个 blocks
+  3. 简化内核逻辑，避免 3D reshape/transpose，直接按 chunk 处理
+  4. 使用 do_not_specialize 避免重编译
+  5. UB 容量规划，批量加载处理多个 tokens
+
+  让我计算 UB 占用：
+  - 每个 chunk：CHUNK_SIZE * H = 64 * 8 = 512 elements of float32 = 2048 bytes
+  - 同时需要 load + compute(cumsum) + store = 2048 * 3 = 6144 bytes
+  - 可用 UB = 85 * 1024 = 87040 bytes
+  - 每次可处理的 chunk 数：N = 87040 // 6144 = 14
+  - 但实际上每个 chunk 只需要 load 和 store（cumsum 是 in-place），所以 S_token
+  ≈ 2048 * 2 = 4096 bytes per chunk
+  - N = 87040 // 4096 = 21
+
+  基于分析，让我设计一个全新的优化版本：
+
+  Read 1 file (ctrl+o to expand)
+
+● 现在深入理解性能测试场景的参数：
+  - B=1, T_total ≈ 10288 (随机在 5144~10288), H=8, chunk_size=64, varlen=True,
+  dtype=float32
+  - cu_seqlens 有效，IS_VARLEN = True
+  - OPTIM_BLOCK_SIZE = (2**18) // (8 * 64) = 512
+  - 对于 T_total ≈ 10288，num_blocks = cdiv(10288, 512) ≈ 21
+
+  在 IS_VARLEN 模式下，block_indices 的用法比较复杂。让我更仔细地理解：
+
+● Bash(export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/A
+      scend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH
+      && source /us…)
+  ⎿  T_total: 6986
+     cu_seqlens: tensor([   0, 6986], device='npu:0')
+     OPTIM_BLOCK_SIZE: 512
+     … +23 lines (ctrl+o to expand)
+
+● 理解了。在 IS_VARLEN 模式下：
+  - block_indices 是一个 (num_blocks, 2) 的 tensor
+  - block_indices[i] = (i_s, i_block)：i_s 是序列索引，i_block 是该序列内的
+  block 索引
+  - 每个 block 处理 OPTIM_BLOCK_SIZE = 512 个 tokens
+  - B=1，只有一个序列，T_total=6986
+  - num_blocks = cdiv(6986, 512) = 14
+
+  关键洞察：在 IS_VARLEN 模式下，kernel 使用 chunk_indices 来索引每个
+  block。但在当前实现中，Grid = (14, 1)，每个核只处理一个 block。
+
+  优化方案：
+  1. 改用固定 Grid = (40,)
+  2. 每个核通过循环处理分配给它的多个 blocks（stride = 40）
+  3. 避免 3D reshape + transpose + cumsum，改用直接在 2D 数据上按 chunk 进行
+  cumsum
+  4. 批量处理多个 tokens
+
+  让我实现优化版本：
+
+  Read 1 file (ctrl+o to expand)
+
+● Write(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 47 lines, removed 44 lines
+      13  from vllm.triton_utils import tl, triton
+      14  
+      15  from .utils import prepare_chunk_indices
+      16 +from vllm_ascend.ops.triton.triton_utils import init_device_pro
+         +perties_triton                                                 
+      17 +from vllm_ascend.ops.triton.triton_utils import get_vectorcore_
+         +num                                                            
+      18  
+      19  
+      18 -@triton.heuristics(                                            
+      19 -    {"HAS_SCALE": lambda args: args["scale"] is not None, "IS_V
+         -ARLEN": lambda args: args["cu_seqlens"] is not None}           
+      20 -)                                                              
+      21 -@triton.jit(do_not_specialize=["T"])                           
+      20 +@triton.jit(do_not_specialize=["T", "num_blocks"])             
+      21  def chunk_local_cumsum_scalar_kernel(
+      22      s,
+      23      o,
+     ...
+      25      cu_seqlens,
+      26      chunk_indices,
+      27      T,
+      29 -    B: tl.constexpr,                                           
+      28 +    num_blocks,                                                
+      29      H: tl.constexpr,
+      30      BLOCK_T: tl.constexpr,
+      31      REVERSE: tl.constexpr,
+     ...
+      34      HEAD_FIRST: tl.constexpr,
+      35      CHUNK_SIZE: tl.constexpr = 64,
+      36  ):
+      38 -    i_block, i_b = tl.program_id(0), tl.program_id(1)          
+      37 +    pid = tl.program_id(0)                                     
+      38 +    NUM_CORE = tl.num_programs(0)                              
+      39      N_CHUNKS: tl.constexpr = BLOCK_T // CHUNK_SIZE
+      40  
+      41 -    if IS_VARLEN:                                              
+      42 -        i_s, i_block = (                                       
+      43 -            tl.load(chunk_indices + i_block * 2).to(tl.int32), 
+      44 -            tl.load(chunk_indices + i_block * 2 + 1).to(tl.int3
+         -2),                                                            
+      45 -        )                                                      
+      46 -        bos, eos = tl.load(cu_seqlens + i_s).to(tl.int32), tl.l
+         -oad(cu_seqlens + i_s + 1).to(tl.int32)                         
+      47 -        T = eos - bos                                          
+      48 -    else:                                                      
+      49 -        bos, eos = i_b * T, i_b * T + T                        
+      41 +    for block_idx in range(pid, num_blocks, NUM_CORE):         
+      42 +        if IS_VARLEN:                                          
+      43 +            i_s = tl.load(chunk_indices + block_idx * 2).to(tl.
+         +int32)                                                         
+      44 +            i_block = tl.load(chunk_indices + block_idx * 2 + 1
+         +).to(tl.int32)                                                 
+      45 +            bos = tl.load(cu_seqlens + i_s).to(tl.int32)       
+      46 +            eos = tl.load(cu_seqlens + i_s + 1).to(tl.int32)   
+      47 +            cur_T = eos - bos                                  
+      48 +        else:                                                  
+      49 +            i_block = block_idx % tl.cdiv(T, BLOCK_T)          
+      50 +            i_b = block_idx // tl.cdiv(T, BLOCK_T)             
+      51 +            bos = i_b * T                                      
+      52 +            cur_T = T                                          
+      53  
+      51 -    if HEAD_FIRST:                                             
+      52 -        ptr_s = tl.make_block_ptr(s + bos * H, (H, T), (T, 1), 
+         -(0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))                  
+      53 -        ptr_o = tl.make_block_ptr(o + bos * H, (H, T), (T, 1), 
+         -(0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))                  
+      54 -        b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.float32
+         -)                                                              
+      55 -        b_s = tl.reshape(b_s, (H, N_CHUNKS, CHUNK_SIZE))       
+      56 -        b_s = tl.trans(b_s, (2, 0, 1))                         
+      57 -        b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)          
+      58 -        if HAS_SCALE:                                          
+      59 -            b_o *= scale                                       
+      60 -        b_o = tl.trans(b_o, (2, 0, 1))                         
+      61 -        b_o = tl.reshape(b_o, (H, BLOCK_T))                    
+      62 -    else:                                                      
+      63 -        ptr_s = tl.make_block_ptr(s + bos * H, (T, H), (H, 1), 
+         -(i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))                  
+      64 -        ptr_o = tl.make_block_ptr(o + bos * H, (T, H), (H, 1), 
+         -(i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))                  
+      65 -        b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.float32
+         -)                                                              
+      66 -        b_s = tl.reshape(b_s, (N_CHUNKS, CHUNK_SIZE, H))       
+      67 -        b_s = tl.trans(b_s, (1, 0, 2))                         
+      68 -        b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)          
+      69 -        if HAS_SCALE:                                          
+      70 -            b_o *= scale                                       
+      71 -        b_o = tl.trans(b_o, (1, 0, 2))                         
+      72 -        b_o = tl.reshape(b_o, (BLOCK_T, H))                    
+      54 +        if HEAD_FIRST:                                         
+      55 +            ptr_s = tl.make_block_ptr(s + bos * H, (H, cur_T), 
+         +(cur_T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))      
+      56 +            ptr_o = tl.make_block_ptr(o + bos * H, (H, cur_T), 
+         +(cur_T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))      
+      57 +            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.flo
+         +at32)                                                          
+      58 +            b_s = tl.reshape(b_s, (H, N_CHUNKS, CHUNK_SIZE))   
+      59 +            b_s = tl.trans(b_s, (2, 0, 1))                     
+      60 +            b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)      
+      61 +            if HAS_SCALE:                                      
+      62 +                b_o *= scale                                   
+      63 +            b_o = tl.trans(b_o, (2, 0, 1))                     
+      64 +            b_o = tl.reshape(b_o, (H, BLOCK_T))                
+      65 +        else:                                                  
+      66 +            ptr_s = tl.make_block_ptr(s + bos * H, (cur_T, H), 
+         +(H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))          
+      67 +            ptr_o = tl.make_block_ptr(o + bos * H, (cur_T, H), 
+         +(H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))          
+      68 +            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.flo
+         +at32)                                                          
+      69 +            b_s = tl.reshape(b_s, (N_CHUNKS, CHUNK_SIZE, H))   
+      70 +            b_s = tl.trans(b_s, (1, 0, 2))                     
+      71 +            b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)      
+      72 +            if HAS_SCALE:                                      
+      73 +                b_o *= scale                                   
+      74 +            b_o = tl.trans(b_o, (1, 0, 2))                     
+      75 +            b_o = tl.reshape(b_o, (BLOCK_T, H))                
+      76  
+      74 -    tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_check=
+         -(0,))                                                          
+      75 -    return                                                     
+      77 +        tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_ch
+         +eck=(0,))                                                      
+      78  
+      79  
+      80  def chunk_local_cumsum_scalar(
+     ...
+       95      OPTIM_BLOCK_SIZE = triton.next_power_of_2((2**18) // (H * 
+           chunk_size))
+       96      if cu_seqlens is not None and block_indices is None:
+       97          block_indices = prepare_chunk_indices(cu_seqlens, chun
+           k_size=OPTIM_BLOCK_SIZE)
+       96 -    num_blocks = len(block_indices) if cu_seqlens is not None 
+          -else triton.cdiv(T, OPTIM_BLOCK_SIZE)                         
+       98 +    num_blocks = len(block_indices) if cu_seqlens is not None 
+          +else triton.cdiv(T, OPTIM_BLOCK_SIZE) * B                     
+       99      g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.
+           dtype)
+       98 -    grid = (num_blocks, B)                                    
+      100 +                                                              
+      101 +    init_device_properties_triton()                           
+      102 +    grid = (get_vectorcore_num(), )                           
+      103 +                                                              
+      104      chunk_local_cumsum_scalar_kernel[grid](
+      105          s=g_org,
+      106          o=g,
+     ...
+      108          cu_seqlens=cu_seqlens,
+      109          chunk_indices=block_indices,
+      110          T=T,
+      106 -        B=B,                                                  
+      111 +        num_blocks=num_blocks,                                
+      112          H=H,
+      113          BLOCK_T=OPTIM_BLOCK_SIZE,
+      114          CHUNK_SIZE=chunk_size,
+      115          HEAD_FIRST=head_first,
+      116          REVERSE=reverse,
+      112 -        num_warps=8,                                          
+      113 -        num_stages=3,                                         
+      117      )
+      118      return g
+      119  
+
+● 验证正确性：
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  Error: Exit code 1
+     ============================= test session starts 
+     ==============================
+     platform linux -- Python 3.11.14, pytest-9.0.3, pluggy-1.6.0 -- 
+     /usr/local/python3.11.14/bin/python
+     cachedir: .pytest_cache
+     rootdir: /vllm-workspace
+     plugins: anyio-4.12.1
+     collecting ... collected 17 items
+
+     test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0-cu_s
+     eqlens[0, 6]-torch.float16] FAILED [  5%]
+     test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0-cu_s
+     eqlens[0, 15]-torch.float16] FAILED [ 11%]
+     … +192 lines (ctrl+o to see all)
+
+● 错误是 HAS_SCALE 和 IS_VARLEN 作为 heuristics 参数缺失。我移除了
+  @triton.heuristics 装饰器但保留了参数。需要恢复 heuristics
+  或在调用时传入这些参数。
+
+  Read 1 file (ctrl+o to expand)
+
+● 需要添加 HAS_SCALE 和 IS_VARLEN 作为调用参数：
+
+● Update(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 2 lines
+      114          CHUNK_SIZE=chunk_size,
+      115          HEAD_FIRST=head_first,
+      116          REVERSE=reverse,
+      117 +        HAS_SCALE=scale is not None,                          
+      118 +        IS_VARLEN=cu_seqlens is not None,                     
+      119      )
+      120      return g
+      121  
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  ============================= test session starts ====================
+     ==========
+     platform linux -- Python 3.11.14, pytest-9.0.3, pluggy-1.6.0 -- /usr/l
+     … +39 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 正确性通过。现在运行性能测试：
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:16:19 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:16:19 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:17:26 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:17:26 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● V1 结果约 0.691~0.756 ms，与基线 0.774 ms 相当。仅将 Grid 固定为 40
+  核并让核内循环多个 blocks 的优化效果不明显——因为原始实现只有 14 个
+  blocks，而现在 40 个核中大部分核只能分到 0 或 1 个 block。
+
+  瓶颈在于每个 block 内部的计算效率。需要重新设计
+  kernel，让每个核处理更细粒度的工作单元（按 chunk 而非按 block），并批量处理多
+  tokens。
+
+  让我重新分析：
+  - 原始方案：每个 block 处理 BLOCK_T=512 个 tokens（包含 N_CHUNKS=8 个 chunk）
+  - 数据形状：(BLOCK_T, H) = (512, 8)，reshape 为 (8, 64, 8)，transpose 为 (64,
+  8, 8)，cumsum axis=0
+  - 实际上 cumsum 是在每个 chunk_size=64 范围内做的
+
+  关键优化思路：将工作单元改为单个 chunk（64*8=512 float32 = 2048
+  bytes），每次循环批量处理多个 chunks。总共 chunks = cdiv(T_total, 64) ≈ 110 个
+   chunks，40 个核均匀分配，每核 ≈ 3 个 chunks。
+
+  UB 计算：每个 chunk 512 元素 * 4 bytes = 2048 bytes。加载 + 中间变量(cumsum) +
+   存储 = 2048 * 2 = 4096 bytes（cumsum in-place）。N = 85*1024 // 4096 = 21 个
+  chunks 可以同时处理。
+
+  但实际上不需要批量——每个 chunk 足够小，优化重点应在减少 reshape/transpose 
+  开销和增加并行度。
+
+  让我设计一个更激进的方案：直接按 chunk 粒度分配任务，避免 3D 
+  reshape/transpose。
+
+● Write(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 72 lines, removed 38 lines
+       17  from vllm_ascend.ops.triton.triton_utils import get_vectorcore
+           _num
+       18  
+       19  
+       20 -@triton.jit(do_not_specialize=["T", "num_blocks"])            
+       20 +@triton.jit(do_not_specialize=["T", "total_chunks"])          
+       21  def chunk_local_cumsum_scalar_kernel(
+       22      s,
+       23      o,
+       24      scale,
+       25      cu_seqlens,
+       26 -    chunk_indices,                                            
+       26 +    chunk_offsets,                                            
+       27 +    seq_count,                                                
+       28      T,
+       28 -    num_blocks,                                               
+       29 +    total_chunks,                                             
+       30      H: tl.constexpr,
+       30 -    BLOCK_T: tl.constexpr,                                    
+       31 +    CHUNK_SIZE: tl.constexpr,                                 
+       32      REVERSE: tl.constexpr,
+       33      HAS_SCALE: tl.constexpr,
+       34      IS_VARLEN: tl.constexpr,
+       35      HEAD_FIRST: tl.constexpr,
+       35 -    CHUNK_SIZE: tl.constexpr = 64,                            
+       36  ):
+       37      pid = tl.program_id(0)
+       38      NUM_CORE = tl.num_programs(0)
+       39 -    N_CHUNKS: tl.constexpr = BLOCK_T // CHUNK_SIZE            
+       39  
+       41 -    for block_idx in range(pid, num_blocks, NUM_CORE):        
+       40 +    for chunk_idx in range(pid, total_chunks, NUM_CORE):      
+       41          if IS_VARLEN:
+       43 -            i_s = tl.load(chunk_indices + block_idx * 2).to(tl
+          -.int32)                                                       
+       44 -            i_block = tl.load(chunk_indices + block_idx * 2 + 
+          -1).to(tl.int32)                                               
+       45 -            bos = tl.load(cu_seqlens + i_s).to(tl.int32)      
+       46 -            eos = tl.load(cu_seqlens + i_s + 1).to(tl.int32)  
+       47 -            cur_T = eos - bos                                 
+       42 +            # Binary search to find which sequence this chunk 
+          +belongs to                                                    
+       43 +            # For single batch with single sequence, this is t
+          +rivial                                                        
+       44 +            bos = 0                                           
+       45 +            cur_T = T                                         
+       46 +            local_chunk = chunk_idx                           
+       47 +            # Find the sequence for this chunk                
+       48 +            for s_idx in range(seq_count):                    
+       49 +                s_bos = tl.load(cu_seqlens + s_idx).to(tl.int3
+          +2)                                                            
+       50 +                s_eos = tl.load(cu_seqlens + s_idx + 1).to(tl.
+          +int32)                                                        
+       51 +                s_len = s_eos - s_bos                         
+       52 +                s_nchunks = tl.cdiv(s_len, CHUNK_SIZE)        
+       53 +                s_chunk_start = tl.load(chunk_offsets + s_idx)
+          +.to(tl.int32)                                                 
+       54 +                s_chunk_end = s_chunk_start + s_nchunks       
+       55 +                if chunk_idx >= s_chunk_start and chunk_idx < 
+          +s_chunk_end:                                                  
+       56 +                    bos = s_bos                               
+       57 +                    cur_T = s_len                             
+       58 +                    local_chunk = chunk_idx - s_chunk_start   
+       59          else:
+       49 -            i_block = block_idx % tl.cdiv(T, BLOCK_T)         
+       50 -            i_b = block_idx // tl.cdiv(T, BLOCK_T)            
+       60 +            # Non-varlen: compute batch and local chunk       
+       61 +            chunks_per_seq = tl.cdiv(T, CHUNK_SIZE)           
+       62 +            i_b = chunk_idx // chunks_per_seq                 
+       63 +            local_chunk = chunk_idx % chunks_per_seq          
+       64              bos = i_b * T
+       65              cur_T = T
+       66  
+       67 +        # Compute start position of this chunk                
+       68 +        chunk_start = local_chunk * CHUNK_SIZE                
+       69 +                                                              
+       70          if HEAD_FIRST:
+       55 -            ptr_s = tl.make_block_ptr(s + bos * H, (H, cur_T),
+          - (cur_T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))    
+       56 -            ptr_o = tl.make_block_ptr(o + bos * H, (H, cur_T),
+          - (cur_T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))    
+       57 -            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.fl
+          -oat32)                                                        
+       58 -            b_s = tl.reshape(b_s, (H, N_CHUNKS, CHUNK_SIZE))  
+       59 -            b_s = tl.trans(b_s, (2, 0, 1))                    
+       60 -            b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)     
+       71 +            # s shape: (*, H, T) -> load (H, CHUNK_SIZE) block
+       72 +            base_ptr = s + bos * H                            
+       73 +            out_base_ptr = o + bos * H                        
+       74 +            # Load chunk data: (H, CHUNK_SIZE)                
+       75 +            offs_h = tl.arange(0, H)                          
+       76 +            offs_c = tl.arange(0, CHUNK_SIZE)                 
+       77 +            # Mask for boundary                               
+       78 +            mask = (chunk_start + offs_c[None, :]) < cur_T    
+       79 +            ptrs = base_ptr + offs_h[:, None] * cur_T + (chunk
+          +_start + offs_c[None, :])                                     
+       80 +            b_s = tl.load(ptrs, mask=mask).to(tl.float32)     
+       81 +            # cumsum along CHUNK_SIZE dimension (axis=1) for e
+          +ach head                                                      
+       82 +            b_o = tl.cumsum(b_s, axis=1, reverse=REVERSE)     
+       83              if HAS_SCALE:
+       84                  b_o *= scale
+       63 -            b_o = tl.trans(b_o, (2, 0, 1))                    
+       64 -            b_o = tl.reshape(b_o, (H, BLOCK_T))               
+       85 +            out_ptrs = out_base_ptr + offs_h[:, None] * cur_T 
+          ++ (chunk_start + offs_c[None, :])                             
+       86 +            tl.store(out_ptrs, b_o.to(s.dtype.element_ty), mas
+          +k=mask)                                                       
+       87          else:
+       66 -            ptr_s = tl.make_block_ptr(s + bos * H, (cur_T, H),
+          - (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))        
+       67 -            ptr_o = tl.make_block_ptr(o + bos * H, (cur_T, H),
+          - (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))        
+       68 -            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.fl
+          -oat32)                                                        
+       69 -            b_s = tl.reshape(b_s, (N_CHUNKS, CHUNK_SIZE, H))  
+       70 -            b_s = tl.trans(b_s, (1, 0, 2))                    
+       88 +            # s shape: (*, T, H) -> load (CHUNK_SIZE, H) block
+       89 +            base_ptr = s + bos * H                            
+       90 +            out_base_ptr = o + bos * H                        
+       91 +            offs_c = tl.arange(0, CHUNK_SIZE)                 
+       92 +            offs_h = tl.arange(0, H)                          
+       93 +            mask = (chunk_start + offs_c[:, None]) < cur_T    
+       94 +            ptrs = base_ptr + (chunk_start + offs_c[:, None]) 
+          +* H + offs_h[None, :]                                         
+       95 +            b_s = tl.load(ptrs, mask=mask).to(tl.float32)     
+       96 +            # cumsum along CHUNK_SIZE dimension (axis=0) for e
+          +ach head                                                      
+       97              b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+       98              if HAS_SCALE:
+       99                  b_o *= scale
+       74 -            b_o = tl.trans(b_o, (1, 0, 2))                    
+       75 -            b_o = tl.reshape(b_o, (BLOCK_T, H))               
+      100 +            out_ptrs = out_base_ptr + (chunk_start + offs_c[:,
+          + None]) * H + offs_h[None, :]                                 
+      101 +            tl.store(out_ptrs, b_o.to(s.dtype.element_ty), mas
+          +k=mask)                                                       
+      102  
+       77 -        tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_c
+          -heck=(0,))                                                    
+      103  
+       79 -                                                              
+      104  def chunk_local_cumsum_scalar(
+      105      g,
+      106      chunk_size,
+     ...
+      116      else:
+      117          B, T, H = g.shape
+      118      assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "
+           chunk_size must be a power of 2"
+       95 -    OPTIM_BLOCK_SIZE = triton.next_power_of_2((2**18) // (H * 
+          -chunk_size))                                                  
+       96 -    if cu_seqlens is not None and block_indices is None:      
+       97 -        block_indices = prepare_chunk_indices(cu_seqlens, chun
+          -k_size=OPTIM_BLOCK_SIZE)                                      
+       98 -    num_blocks = len(block_indices) if cu_seqlens is not None 
+          -else triton.cdiv(T, OPTIM_BLOCK_SIZE) * B                     
+      119 +                                                              
+      120      g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.
+           dtype)
+      121  
+      122      init_device_properties_triton()
+      123      grid = (get_vectorcore_num(), )
+      124  
+      125 +    if cu_seqlens is not None:                                
+      126 +        seq_count = len(cu_seqlens) - 1                       
+      127 +        # Compute chunk offsets for each sequence             
+      128 +        lens = cu_seqlens[1:] - cu_seqlens[:-1]               
+      129 +        nchunks_per_seq = torch.div(lens + chunk_size - 1, chu
+          +nk_size, rounding_mode='trunc')                               
+      130 +        chunk_offsets = torch.zeros(seq_count + 1, dtype=torch
+          +.int64, device=cu_seqlens.device)                             
+      131 +        chunk_offsets[1:] = torch.cumsum(nchunks_per_seq, dim=
+          +0)                                                            
+      132 +        total_chunks = int(chunk_offsets[-1].item())          
+      133 +    else:                                                     
+      134 +        seq_count = B                                         
+      135 +        total_chunks = triton.cdiv(T, chunk_size) * B         
+      136 +        chunk_offsets = None                                  
+      137 +                                                              
+      138      chunk_local_cumsum_scalar_kernel[grid](
+      139          s=g_org,
+      140          o=g,
+      141          scale=scale,
+      142          cu_seqlens=cu_seqlens,
+      109 -        chunk_indices=block_indices,                          
+      143 +        chunk_offsets=chunk_offsets,                          
+      144 +        seq_count=seq_count,                                  
+      145          T=T,
+      111 -        num_blocks=num_blocks,                                
+      146 +        total_chunks=total_chunks,                            
+      147          H=H,
+      113 -        BLOCK_T=OPTIM_BLOCK_SIZE,                             
+      148          CHUNK_SIZE=chunk_size,
+      149          HEAD_FIRST=head_first,
+      150          REVERSE=reverse,
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  collecting ... collected 17 items
+
+     test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     … +35 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 17 项全部通过！运行性能测试：
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:21:20 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:21:20 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:22:27 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:22:27 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● V2 约 0.570~0.621 ms，相比基线 0.774 ms，加速比约
+  1.3x。还需进一步优化。保存当前有效版本并继续优化。
+
+● Bash(cp /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum_v2_good.py)
+  ⎿  Done
+
+● 分析 V2 的瓶颈：
+
+  1. IS_VARLEN 的序列查找循环：每个 chunk 都要遍历所有序列来确定归属，引入大量
+  Scalar 计算
+  2. Host 端创建 chunk_offsets tensor：增加了 Python 开销
+  3. 使用了 tl.load with mask：破坏流水并行
+  4. 逐元素地址计算：ptrs = base_ptr + offs_c[:, None] * H + offs_h[None, :]
+  引入 Scalar 计算
+
+  V3 优化方案：
+  1. 保留原始的 chunk_indices（已在 host 预计算好），将 block 粒度改为 chunk
+  粒度
+  2. 使用 make_block_ptr 替代手动地址计算，避免 Scalar 开销
+  3. 直接在 2D (CHUNK_SIZE, H) 上做 cumsum，不需要 3D reshape/transpose
+  4. 避免 mask load，使用 boundary_check
+
+● Write(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 29 lines, removed 67 lines
+      17  from vllm_ascend.ops.triton.triton_utils import get_vectorcore_
+          num
+      18  
+      19  
+      20 -@triton.jit(do_not_specialize=["T", "total_chunks"])           
+      20 +@triton.jit(do_not_specialize=["T", "num_chunks"])             
+      21  def chunk_local_cumsum_scalar_kernel(
+      22      s,
+      23      o,
+      24      scale,
+      25      cu_seqlens,
+      26 -    chunk_offsets,                                             
+      27 -    seq_count,                                                 
+      26 +    chunk_indices,                                             
+      27      T,
+      29 -    total_chunks,                                              
+      28 +    num_chunks,                                                
+      29      H: tl.constexpr,
+      30      CHUNK_SIZE: tl.constexpr,
+      31      REVERSE: tl.constexpr,
+     ...
+       36      pid = tl.program_id(0)
+       37      NUM_CORE = tl.num_programs(0)
+       38  
+       40 -    for chunk_idx in range(pid, total_chunks, NUM_CORE):      
+       39 +    for ci in range(pid, num_chunks, NUM_CORE):               
+       40          if IS_VARLEN:
+       42 -            # Binary search to find which sequence this chunk 
+          -belongs to                                                    
+       43 -            # For single batch with single sequence, this is t
+          -rivial                                                        
+       44 -            bos = 0                                           
+       45 -            cur_T = T                                         
+       46 -            local_chunk = chunk_idx                           
+       47 -            # Find the sequence for this chunk                
+       48 -            for s_idx in range(seq_count):                    
+       49 -                s_bos = tl.load(cu_seqlens + s_idx).to(tl.int3
+          -2)                                                            
+       50 -                s_eos = tl.load(cu_seqlens + s_idx + 1).to(tl.
+          -int32)                                                        
+       51 -                s_len = s_eos - s_bos                         
+       52 -                s_nchunks = tl.cdiv(s_len, CHUNK_SIZE)        
+       53 -                s_chunk_start = tl.load(chunk_offsets + s_idx)
+          -.to(tl.int32)                                                 
+       54 -                s_chunk_end = s_chunk_start + s_nchunks       
+       55 -                if chunk_idx >= s_chunk_start and chunk_idx < 
+          -s_chunk_end:                                                  
+       56 -                    bos = s_bos                               
+       57 -                    cur_T = s_len                             
+       58 -                    local_chunk = chunk_idx - s_chunk_start   
+       41 +            i_s = tl.load(chunk_indices + ci * 2).to(tl.int32)
+       42 +            i_chunk = tl.load(chunk_indices + ci * 2 + 1).to(t
+          +l.int32)                                                      
+       43 +            bos = tl.load(cu_seqlens + i_s).to(tl.int32)      
+       44 +            eos = tl.load(cu_seqlens + i_s + 1).to(tl.int32)  
+       45 +            cur_T = eos - bos                                 
+       46          else:
+       60 -            # Non-varlen: compute batch and local chunk       
+       47              chunks_per_seq = tl.cdiv(T, CHUNK_SIZE)
+       62 -            i_b = chunk_idx // chunks_per_seq                 
+       63 -            local_chunk = chunk_idx % chunks_per_seq          
+       48 +            i_b = ci // chunks_per_seq                        
+       49 +            i_chunk = ci % chunks_per_seq                     
+       50              bos = i_b * T
+       51              cur_T = T
+       52  
+       67 -        # Compute start position of this chunk                
+       68 -        chunk_start = local_chunk * CHUNK_SIZE                
+       53 +        chunk_start = i_chunk * CHUNK_SIZE                    
+       54  
+       55          if HEAD_FIRST:
+       71 -            # s shape: (*, H, T) -> load (H, CHUNK_SIZE) block
+       72 -            base_ptr = s + bos * H                            
+       73 -            out_base_ptr = o + bos * H                        
+       74 -            # Load chunk data: (H, CHUNK_SIZE)                
+       75 -            offs_h = tl.arange(0, H)                          
+       76 -            offs_c = tl.arange(0, CHUNK_SIZE)                 
+       77 -            # Mask for boundary                               
+       78 -            mask = (chunk_start + offs_c[None, :]) < cur_T    
+       79 -            ptrs = base_ptr + offs_h[:, None] * cur_T + (chunk
+          -_start + offs_c[None, :])                                     
+       80 -            b_s = tl.load(ptrs, mask=mask).to(tl.float32)     
+       81 -            # cumsum along CHUNK_SIZE dimension (axis=1) for e
+          -ach head                                                      
+       56 +            ptr_s = tl.make_block_ptr(s + bos * H, (H, cur_T),
+          + (cur_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))       
+       57 +            ptr_o = tl.make_block_ptr(o + bos * H, (H, cur_T),
+          + (cur_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))       
+       58 +            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.fl
+          +oat32)                                                        
+       59 +            # b_s shape: (H, CHUNK_SIZE), cumsum along axis=1 
+          +(time dimension)                                              
+       60              b_o = tl.cumsum(b_s, axis=1, reverse=REVERSE)
+       61              if HAS_SCALE:
+       62                  b_o *= scale
+       85 -            out_ptrs = out_base_ptr + offs_h[:, None] * cur_T 
+          -+ (chunk_start + offs_c[None, :])                             
+       86 -            tl.store(out_ptrs, b_o.to(s.dtype.element_ty), mas
+          -k=mask)                                                       
+       63          else:
+       88 -            # s shape: (*, T, H) -> load (CHUNK_SIZE, H) block
+       89 -            base_ptr = s + bos * H                            
+       90 -            out_base_ptr = o + bos * H                        
+       91 -            offs_c = tl.arange(0, CHUNK_SIZE)                 
+       92 -            offs_h = tl.arange(0, H)                          
+       93 -            mask = (chunk_start + offs_c[:, None]) < cur_T    
+       94 -            ptrs = base_ptr + (chunk_start + offs_c[:, None]) 
+          -* H + offs_h[None, :]                                         
+       95 -            b_s = tl.load(ptrs, mask=mask).to(tl.float32)     
+       96 -            # cumsum along CHUNK_SIZE dimension (axis=0) for e
+          -ach head                                                      
+       64 +            ptr_s = tl.make_block_ptr(s + bos * H, (cur_T, H),
+          + (H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))           
+       65 +            ptr_o = tl.make_block_ptr(o + bos * H, (cur_T, H),
+          + (H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))           
+       66 +            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.fl
+          +oat32)                                                        
+       67 +            # b_s shape: (CHUNK_SIZE, H), cumsum along axis=0 
+          +(time dimension)                                              
+       68              b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+       69              if HAS_SCALE:
+       70                  b_o *= scale
+      100 -            out_ptrs = out_base_ptr + (chunk_start + offs_c[:,
+          - None]) * H + offs_h[None, :]                                 
+      101 -            tl.store(out_ptrs, b_o.to(s.dtype.element_ty), mas
+          -k=mask)                                                       
+       71  
+       72 +        tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_c
+          +heck=(0,))                                                    
+       73  
+       74 +                                                              
+       75  def chunk_local_cumsum_scalar(
+       76      g,
+       77      chunk_size,
+     ...
+       88          B, T, H = g.shape
+       89      assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "
+           chunk_size must be a power of 2"
+       90  
+       91 +    # Use chunk_size directly as the block size for chunk-leve
+          +l parallelism                                                 
+       92 +    if cu_seqlens is not None and block_indices is None:      
+       93 +        block_indices = prepare_chunk_indices(cu_seqlens, chun
+          +k_size=chunk_size)                                            
+       94 +    num_chunks = len(block_indices) if cu_seqlens is not None 
+          +else triton.cdiv(T, chunk_size) * B                           
+       95 +                                                              
+       96      g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.
+           dtype)
+       97  
+       98      init_device_properties_triton()
+       99      grid = (get_vectorcore_num(), )
+      100  
+      125 -    if cu_seqlens is not None:                                
+      126 -        seq_count = len(cu_seqlens) - 1                       
+      127 -        # Compute chunk offsets for each sequence             
+      128 -        lens = cu_seqlens[1:] - cu_seqlens[:-1]               
+      129 -        nchunks_per_seq = torch.div(lens + chunk_size - 1, chu
+          -nk_size, rounding_mode='trunc')                               
+      130 -        chunk_offsets = torch.zeros(seq_count + 1, dtype=torch
+          -.int64, device=cu_seqlens.device)                             
+      131 -        chunk_offsets[1:] = torch.cumsum(nchunks_per_seq, dim=
+          -0)                                                            
+      132 -        total_chunks = int(chunk_offsets[-1].item())          
+      133 -    else:                                                     
+      134 -        seq_count = B                                         
+      135 -        total_chunks = triton.cdiv(T, chunk_size) * B         
+      136 -        chunk_offsets = None                                  
+      137 -                                                              
+      101      chunk_local_cumsum_scalar_kernel[grid](
+      102          s=g_org,
+      103          o=g,
+      104          scale=scale,
+      105          cu_seqlens=cu_seqlens,
+      143 -        chunk_offsets=chunk_offsets,                          
+      144 -        seq_count=seq_count,                                  
+      106 +        chunk_indices=block_indices,                          
+      107          T=T,
+      146 -        total_chunks=total_chunks,                            
+      108 +        num_chunks=num_chunks,                                
+      109          H=H,
+      110          CHUNK_SIZE=chunk_size,
+      111          HEAD_FIRST=head_first,
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     -cu_seqlens[0, 31]-torch.float16] PASSED [ 23%]
+     test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     … +30 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 17 项全通过！性能测试：
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:26:38 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:26:38 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● V3 (0.741 ms) 比 V2 (0.570 ms) 更慢。chunk 粒度太细（110 个 chunks，每个 chunk
+   只有 64*8 = 512 elements），每个 chunk 内的计算量太少，kernel launch
+  和循环开销占比过大。
+
+  回到 V2 方案并进一步优化。V2 的核心优势在于去掉了 3D
+  reshape/transpose，并且使用手动地址计算而非 make_block_ptr（但 mask
+  是一个问题）。
+
+  让我尝试一种混合方案：保持 BLOCK_T 级别的工作单元（512 tokens），但消除 3D
+  reshape/transpose，改用逐 chunk 处理。
+
+● Bash(cp
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum_v2_good.py
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Done
+
+● V2 的问题在于 host 端的 chunk_offsets 创建开销和 kernel
+  内的序列搜索循环。让我分析 Host 端到底贡献了多少开销：
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:28:28 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:28:28 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +8 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+● 重大发现！prepare_chunk_indices(chunk_size=512) 每次耗时 1.820 ms，比 kernel
+  本身还慢！这是因为 prepare_chunk_indices 使用了 Python 的 list comprehension
+  和 torch.arange 创建 indices。
+
+  但 perf 测试中 chunk_local_cumsum 是总耗时。让我再仔细看看 perf
+  测试中是否预先计算了 block_indices：
+
+  Read 1 file (ctrl+o to expand)
+
+● 性能测试调用 chunk_local_cumsum(g_orig, chunk_size=64, 
+  cu_seqlens=cu_seqlens)，没有传入 block_indices。所以 prepare_chunk_indices
+  在每次调用中都会执行！这意味着 Host 端计算 prepare_chunk_indices
+  是一个大开销。
+
+  在 V2 中，我没有使用 prepare_chunk_indices，而是在 Host 端用 torch 算了
+  chunk_offsets。让我验证当前 V2 代码实际上在 Host 端的开销：
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  V2 host chunk_offsets avg: 0.512 ms, total_chunks=110
+     INFO 04-08 12:29:31 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     … +6 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+● 关键发现：Host 端开销约 0.49~0.51 ms，占总耗时的 65%+！需要大幅减少 Host
+  端计算。
+
+  让我设计 V4：完全消除 Host 端 tensor 创建，让 kernel 自行从 cu_seqlens
+  计算映射。
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  tolist approach avg: 0.0382 ms, total_chunks=110
+     item approach avg: 0.0353 ms, total_chunks=110
+     len only avg: 0.0017 ms
+  ⎿  (timeout 5m)
+
+● 使用 .tolist() 在 CPU 上计算 total_chunks 只需 0.038 ms！比之前的 0.5 ms 快 13
+   倍！
+
+  现在设计 V4：
+  1. Host 端用 .tolist() 在 CPU 端快速计算 total_chunks 和预构建一个简单的查找表
+  2. 不再创建新 tensor，直接传 cu_seqlens 给 kernel
+  3. Kernel 内使用简单的序列查找
+
+● Write(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 39 lines, removed 59 lines
+      17  from vllm_ascend.ops.triton.triton_utils import get_vectorcore_
+          num
+      18  
+      19  
+      20 -@triton.jit(do_not_specialize=["T", "total_chunks"])           
+      20 +@triton.jit(do_not_specialize=["T", "total_chunks", "seq_count"
+         +])                                                             
+      21  def chunk_local_cumsum_scalar_kernel(
+      22      s,
+      23      o,
+      24      scale,
+      25      cu_seqlens,
+      26 -    chunk_offsets,                                             
+      27 -    seq_count,                                                 
+      26 +    chunk_cumsum,                                              
+      27      T,
+      28      total_chunks,
+      29 +    seq_count,                                                 
+      30      H: tl.constexpr,
+      31      CHUNK_SIZE: tl.constexpr,
+      32      REVERSE: tl.constexpr,
+     ...
+       37      pid = tl.program_id(0)
+       38      NUM_CORE = tl.num_programs(0)
+       39  
+       40 -    for chunk_idx in range(pid, total_chunks, NUM_CORE):      
+       40 +    for ci in range(pid, total_chunks, NUM_CORE):             
+       41          if IS_VARLEN:
+       42 -            # Binary search to find which sequence this chunk 
+          -belongs to                                                    
+       43 -            # For single batch with single sequence, this is t
+          -rivial                                                        
+       44 -            bos = 0                                           
+       45 -            cur_T = T                                         
+       46 -            local_chunk = chunk_idx                           
+       47 -            # Find the sequence for this chunk                
+       42 +            # Find which sequence this chunk belongs to using 
+          +chunk_cumsum                                                  
+       43 +            # chunk_cumsum[i] = cumulative number of chunks fo
+          +r sequences 0..i-1                                            
+       44 +            i_s = 0                                           
+       45 +            i_chunk = ci                                      
+       46              for s_idx in range(seq_count):
+       49 -                s_bos = tl.load(cu_seqlens + s_idx).to(tl.int3
+          -2)                                                            
+       50 -                s_eos = tl.load(cu_seqlens + s_idx + 1).to(tl.
+          -int32)                                                        
+       51 -                s_len = s_eos - s_bos                         
+       52 -                s_nchunks = tl.cdiv(s_len, CHUNK_SIZE)        
+       53 -                s_chunk_start = tl.load(chunk_offsets + s_idx)
+          -.to(tl.int32)                                                 
+       54 -                s_chunk_end = s_chunk_start + s_nchunks       
+       55 -                if chunk_idx >= s_chunk_start and chunk_idx < 
+          -s_chunk_end:                                                  
+       56 -                    bos = s_bos                               
+       57 -                    cur_T = s_len                             
+       58 -                    local_chunk = chunk_idx - s_chunk_start   
+       47 +                cs = tl.load(chunk_cumsum + s_idx).to(tl.int32
+          +)                                                             
+       48 +                cs_next = tl.load(chunk_cumsum + s_idx + 1).to
+          +(tl.int32)                                                    
+       49 +                if ci >= cs and ci < cs_next:                 
+       50 +                    i_s = s_idx                               
+       51 +                    i_chunk = ci - cs                         
+       52 +            bos = tl.load(cu_seqlens + i_s).to(tl.int32)      
+       53 +            eos = tl.load(cu_seqlens + i_s + 1).to(tl.int32)  
+       54 +            cur_T = eos - bos                                 
+       55          else:
+       60 -            # Non-varlen: compute batch and local chunk       
+       56              chunks_per_seq = tl.cdiv(T, CHUNK_SIZE)
+       62 -            i_b = chunk_idx // chunks_per_seq                 
+       63 -            local_chunk = chunk_idx % chunks_per_seq          
+       57 +            i_b = ci // chunks_per_seq                        
+       58 +            i_chunk = ci % chunks_per_seq                     
+       59              bos = i_b * T
+       60              cur_T = T
+       61  
+       67 -        # Compute start position of this chunk                
+       68 -        chunk_start = local_chunk * CHUNK_SIZE                
+       62 +        chunk_start = i_chunk * CHUNK_SIZE                    
+       63  
+       64          if HEAD_FIRST:
+       71 -            # s shape: (*, H, T) -> load (H, CHUNK_SIZE) block
+       72 -            base_ptr = s + bos * H                            
+       73 -            out_base_ptr = o + bos * H                        
+       74 -            # Load chunk data: (H, CHUNK_SIZE)                
+       75 -            offs_h = tl.arange(0, H)                          
+       76 -            offs_c = tl.arange(0, CHUNK_SIZE)                 
+       77 -            # Mask for boundary                               
+       78 -            mask = (chunk_start + offs_c[None, :]) < cur_T    
+       79 -            ptrs = base_ptr + offs_h[:, None] * cur_T + (chunk
+          -_start + offs_c[None, :])                                     
+       80 -            b_s = tl.load(ptrs, mask=mask).to(tl.float32)     
+       81 -            # cumsum along CHUNK_SIZE dimension (axis=1) for e
+          -ach head                                                      
+       65 +            ptr_s = tl.make_block_ptr(s + bos * H, (H, cur_T),
+          + (cur_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))       
+       66 +            ptr_o = tl.make_block_ptr(o + bos * H, (H, cur_T),
+          + (cur_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))       
+       67 +            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.fl
+          +oat32)                                                        
+       68              b_o = tl.cumsum(b_s, axis=1, reverse=REVERSE)
+       69              if HAS_SCALE:
+       70                  b_o *= scale
+       85 -            out_ptrs = out_base_ptr + offs_h[:, None] * cur_T 
+          -+ (chunk_start + offs_c[None, :])                             
+       86 -            tl.store(out_ptrs, b_o.to(s.dtype.element_ty), mas
+          -k=mask)                                                       
+       71          else:
+       88 -            # s shape: (*, T, H) -> load (CHUNK_SIZE, H) block
+       89 -            base_ptr = s + bos * H                            
+       90 -            out_base_ptr = o + bos * H                        
+       91 -            offs_c = tl.arange(0, CHUNK_SIZE)                 
+       92 -            offs_h = tl.arange(0, H)                          
+       93 -            mask = (chunk_start + offs_c[:, None]) < cur_T    
+       94 -            ptrs = base_ptr + (chunk_start + offs_c[:, None]) 
+          -* H + offs_h[None, :]                                         
+       95 -            b_s = tl.load(ptrs, mask=mask).to(tl.float32)     
+       96 -            # cumsum along CHUNK_SIZE dimension (axis=0) for e
+          -ach head                                                      
+       72 +            ptr_s = tl.make_block_ptr(s + bos * H, (cur_T, H),
+          + (H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))           
+       73 +            ptr_o = tl.make_block_ptr(o + bos * H, (cur_T, H),
+          + (H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))           
+       74 +            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.fl
+          +oat32)                                                        
+       75              b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+       76              if HAS_SCALE:
+       77                  b_o *= scale
+      100 -            out_ptrs = out_base_ptr + (chunk_start + offs_c[:,
+          - None]) * H + offs_h[None, :]                                 
+      101 -            tl.store(out_ptrs, b_o.to(s.dtype.element_ty), mas
+          -k=mask)                                                       
+       78  
+       79 +        tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_c
+          +heck=(0,))                                                    
+       80  
+       81 +                                                              
+       82  def chunk_local_cumsum_scalar(
+       83      g,
+       84      chunk_size,
+     ...
+      101      grid = (get_vectorcore_num(), )
+      102  
+      103      if cu_seqlens is not None:
+      126 -        seq_count = len(cu_seqlens) - 1                       
+      127 -        # Compute chunk offsets for each sequence             
+      128 -        lens = cu_seqlens[1:] - cu_seqlens[:-1]               
+      129 -        nchunks_per_seq = torch.div(lens + chunk_size - 1, chu
+          -nk_size, rounding_mode='trunc')                               
+      130 -        chunk_offsets = torch.zeros(seq_count + 1, dtype=torch
+          -.int64, device=cu_seqlens.device)                             
+      131 -        chunk_offsets[1:] = torch.cumsum(nchunks_per_seq, dim=
+          -0)                                                            
+      132 -        total_chunks = int(chunk_offsets[-1].item())          
+      104 +        # Compute chunk_cumsum on CPU for minimal overhead    
+      105 +        cu_list = cu_seqlens.tolist()                         
+      106 +        seq_count = len(cu_list) - 1                          
+      107 +        chunk_counts = [(cu_list[i+1] - cu_list[i] + chunk_siz
+          +e - 1) // chunk_size for i in range(seq_count)]               
+      108 +        cumsum = [0]                                          
+      109 +        for c in chunk_counts:                                
+      110 +            cumsum.append(cumsum[-1] + c)                     
+      111 +        total_chunks = cumsum[-1]                             
+      112 +        chunk_cumsum = torch.tensor(cumsum, dtype=torch.int64,
+          + device=cu_seqlens.device)                                    
+      113      else:
+      114          seq_count = B
+      115          total_chunks = triton.cdiv(T, chunk_size) * B
+      136 -        chunk_offsets = None                                  
+      116 +        chunk_cumsum = None                                   
+      117  
+      118      chunk_local_cumsum_scalar_kernel[grid](
+      119          s=g_org,
+      120          o=g,
+      121          scale=scale,
+      122          cu_seqlens=cu_seqlens,
+      143 -        chunk_offsets=chunk_offsets,                          
+      144 -        seq_count=seq_count,                                  
+      123 +        chunk_cumsum=chunk_cumsum,                            
+      124          T=T,
+      125          total_chunks=total_chunks,
+      126 +        seq_count=seq_count,                                  
+      127          H=H,
+      128          CHUNK_SIZE=chunk_size,
+      129          HEAD_FIRST=head_first,
+
+● .
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     -cu_seqlens[0, 31]-torch.float16] PASSED [ 23%]
+     test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     … +30 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:34:23 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:34:23 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:35:31 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:35:31 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:36:42 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:36:42 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● V4 约 0.350~0.444 ms，相比基线 0.774 ms，加速比约 1.75~2.2x！已超越 1.3x
+  目标。保存该版本并继续优化：
+
+● Bash(cp /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum_v4_good.py)
+  ⎿  Done
+
+● 继续分析剩余优化空间。当前还有 Host 端 torch.tensor(cumsum, ...)
+  创建张量的开销。让我测量一下：
+
+● Bash(export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/A
+      scend/driver/lib64/common:/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH
+      && source /us…)
+  ⎿  V4 full host avg: 0.1382 ms
+     Without tensor creation avg: 0.0405 ms
+  ⎿  (timeout 5m)
+
+● torch.tensor 创建 (CPU list -> NPU tensor) 约 0.1 ms。让我考虑避免创建这个
+  tensor：对于 B=1 的单序列情况，根本不需要 chunk_cumsum——chunk_idx 直接就是
+  local chunk index，bos=0。
+
+  Read 1 file (ctrl+o to expand)
+
+● V5 优化策略：完全消除 chunk_cumsum tensor 的创建。对于单序列场景，kernel
+  内直接用 cu_seqlens 做简化处理。同时将测试中已确认的 B=1 场景特化处理。
+
+● Write(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 18 lines, removed 21 lines
+      23      o,
+      24      scale,
+      25      cu_seqlens,
+      26 -    chunk_cumsum,                                              
+      26      T,
+      27      total_chunks,
+      28      seq_count,
+     ...
+      38  
+      39      for ci in range(pid, total_chunks, NUM_CORE):
+      40          if IS_VARLEN:
+      42 -            # Find which sequence this chunk belongs to using c
+         -hunk_cumsum                                                    
+      43 -            # chunk_cumsum[i] = cumulative number of chunks for
+         - sequences 0..i-1                                              
+      44 -            i_s = 0                                            
+      41 +            # Find which sequence this chunk belongs to        
+      42 +            # Walk through cu_seqlens to find the right sequenc
+         +e                                                              
+      43 +            bos = 0                                            
+      44 +            cur_T = T                                          
+      45              i_chunk = ci
+      46 +            remaining = ci                                     
+      47              for s_idx in range(seq_count):
+      47 -                cs = tl.load(chunk_cumsum + s_idx).to(tl.int32)
+      48 -                cs_next = tl.load(chunk_cumsum + s_idx + 1).to(
+         -tl.int32)                                                      
+      49 -                if ci >= cs and ci < cs_next:                  
+      50 -                    i_s = s_idx                                
+      51 -                    i_chunk = ci - cs                          
+      52 -            bos = tl.load(cu_seqlens + i_s).to(tl.int32)       
+      53 -            eos = tl.load(cu_seqlens + i_s + 1).to(tl.int32)   
+      54 -            cur_T = eos - bos                                  
+      48 +                s_bos = tl.load(cu_seqlens + s_idx).to(tl.int32
+         +)                                                              
+      49 +                s_eos = tl.load(cu_seqlens + s_idx + 1).to(tl.i
+         +nt32)                                                          
+      50 +                s_len = s_eos - s_bos                          
+      51 +                s_nchunks = tl.cdiv(s_len, CHUNK_SIZE)         
+      52 +                if remaining < s_nchunks:                      
+      53 +                    bos = s_bos                                
+      54 +                    cur_T = s_len                              
+      55 +                    i_chunk = remaining                        
+      56 +                    remaining = -1  # mark found, won't enter a
+         +gain                                                           
+      57 +                else:                                          
+      58 +                    remaining = remaining - s_nchunks          
+      59          else:
+      60              chunks_per_seq = tl.cdiv(T, CHUNK_SIZE)
+      61              i_b = ci // chunks_per_seq
+     ...
+      105      grid = (get_vectorcore_num(), )
+      106  
+      107      if cu_seqlens is not None:
+      104 -        # Compute chunk_cumsum on CPU for minimal overhead    
+      108 +        # Compute total_chunks on CPU with minimal overhead (n
+          +o tensor creation)                                            
+      109          cu_list = cu_seqlens.tolist()
+      110          seq_count = len(cu_list) - 1
+      107 -        chunk_counts = [(cu_list[i+1] - cu_list[i] + chunk_siz
+          -e - 1) // chunk_size for i in range(seq_count)]               
+      108 -        cumsum = [0]                                          
+      109 -        for c in chunk_counts:                                
+      110 -            cumsum.append(cumsum[-1] + c)                     
+      111 -        total_chunks = cumsum[-1]                             
+      112 -        chunk_cumsum = torch.tensor(cumsum, dtype=torch.int64,
+          - device=cu_seqlens.device)                                    
+      111 +        total_chunks = sum((cu_list[i+1] - cu_list[i] + chunk_
+          +size - 1) // chunk_size for i in range(seq_count))            
+      112      else:
+      113          seq_count = B
+      114          total_chunks = triton.cdiv(T, chunk_size) * B
+      116 -        chunk_cumsum = None                                   
+      115  
+      116      chunk_local_cumsum_scalar_kernel[grid](
+      117          s=g_org,
+      118          o=g,
+      119          scale=scale,
+      120          cu_seqlens=cu_seqlens,
+      123 -        chunk_cumsum=chunk_cumsum,                            
+      121          T=T,
+      122          total_chunks=total_chunks,
+      123          seq_count=seq_count,
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     -cu_seqlens[0, 31]-torch.float16] PASSED [ 23%]
+     test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     … +30 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:41:37 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:41:37 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:43:23 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:43:23 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:44:31 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:44:31 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● V5 约 0.268~0.282 ms，相比基线 0.774 ms，加速比约
+  2.8x！保存并继续追求极致性能：
+
+● Bash(cp /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum_v5_good.py)
+  ⎿  Done
+
+● V5 的 host 端约 0.04 ms，kernel 端约 0.23 ms。继续优化 kernel：
+
+  1. 对于 B=1 单序列，kernel 内的 for s_idx in range(seq_count) 循环只有 1
+  次迭代，但仍产生不必要的 Scalar 开销
+  2. remaining 变量的条件判断可以简化
+
+  让我尝试 V6：在 kernel 内消除 range(seq_count) 循环的开销，同时尝试多 chunk
+  批量处理（multi-token 并行）。
+
+  当前每次循环只处理 1 个 chunk (64×8=512 float32 = 2KB)，UB 可容纳约 85KB / 2KB
+   ≈ 42 个 chunk，但 cumsum 操作内部需要中间结果，实际 S_token = 6484 (load) +
+  6484 (cumsum output) = 4096 bytes per chunk。N = 85*1024 // 4096 = 21。
+
+  但批量处理多 chunks 的问题是：每个 chunk 的 cumsum 是独立的，不能跨 chunk
+  合并。如果批量 load 多个 chunks 的数据，计算还是要分开做。
+
+  更好的思路：增大每次处理的 block 大小，合并多个 chunks。当前 (CHUNK_SIZE, H) =
+   (64, 8)，可以扩大到 (CHUNK_SIZE * N_CHUNKS, H)，然后做 reshape + cumsum
+  方式——但这就回到了原始方案。
+
+  换一个角度：对于非 varlen 的情况，kernel 内不需要任何序列查找。对于 varlen 但
+  seq_count=1 的情况，也不需要查找。让我尝试在 Python 端对 B=1、seq_count=1
+  做特化处理，直接传入 bos 和 total_T：
+
+● Write(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 110 lines, removed 24 lines
+      39      for ci in range(pid, total_chunks, NUM_CORE):
+      40          if IS_VARLEN:
+      41              # Find which sequence this chunk belongs to
+      42 -            # Walk through cu_seqlens to find the right sequenc
+         -e                                                              
+      42              bos = 0
+      44 -            cur_T = T                                          
+      43 +            cur_T = 0                                          
+      44              i_chunk = ci
+      45              remaining = ci
+      46              for s_idx in range(seq_count):
+     ...
+      48                  s_eos = tl.load(cu_seqlens + s_idx + 1).to(tl.i
+          nt32)
+      49                  s_len = s_eos - s_bos
+      50                  s_nchunks = tl.cdiv(s_len, CHUNK_SIZE)
+      52 -                if remaining < s_nchunks:                      
+      51 +                if remaining >= 0 and remaining < s_nchunks:   
+      52                      bos = s_bos
+      53                      cur_T = s_len
+      54                      i_chunk = remaining
+      56 -                    remaining = -1  # mark found, won't enter a
+         -gain                                                           
+      57 -                else:                                          
+      55 +                    remaining = -1                             
+      56 +                elif remaining >= 0:                           
+      57                      remaining = remaining - s_nchunks
+      58          else:
+      59              chunks_per_seq = tl.cdiv(T, CHUNK_SIZE)
+     ...
+       82          tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_c
+           heck=(0,))
+       83  
+       84  
+       85 +@triton.jit(do_not_specialize=["total_T", "total_chunks"])    
+       86 +def chunk_local_cumsum_simple_kernel(                         
+       87 +    s,                                                        
+       88 +    o,                                                        
+       89 +    scale,                                                    
+       90 +    total_T,                                                  
+       91 +    total_chunks,                                             
+       92 +    H: tl.constexpr,                                          
+       93 +    CHUNK_SIZE: tl.constexpr,                                 
+       94 +    REVERSE: tl.constexpr,                                    
+       95 +    HAS_SCALE: tl.constexpr,                                  
+       96 +    HEAD_FIRST: tl.constexpr,                                 
+       97 +):                                                            
+       98 +    """Simplified kernel for single-sequence or non-varlen cas
+          +es."""                                                        
+       99 +    pid = tl.program_id(0)                                    
+      100 +    NUM_CORE = tl.num_programs(0)                             
+      101 +                                                              
+      102 +    for ci in range(pid, total_chunks, NUM_CORE):             
+      103 +        chunk_start = ci * CHUNK_SIZE                         
+      104 +                                                              
+      105 +        if HEAD_FIRST:                                        
+      106 +            ptr_s = tl.make_block_ptr(s, (H, total_T), (total_
+          +T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))             
+      107 +            ptr_o = tl.make_block_ptr(o, (H, total_T), (total_
+          +T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))             
+      108 +            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.fl
+          +oat32)                                                        
+      109 +            b_o = tl.cumsum(b_s, axis=1, reverse=REVERSE)     
+      110 +            if HAS_SCALE:                                     
+      111 +                b_o *= scale                                  
+      112 +        else:                                                 
+      113 +            ptr_s = tl.make_block_ptr(s, (total_T, H), (H, 1),
+          + (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))                   
+      114 +            ptr_o = tl.make_block_ptr(o, (total_T, H), (H, 1),
+          + (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))                   
+      115 +            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.fl
+          +oat32)                                                        
+      116 +            b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)     
+      117 +            if HAS_SCALE:                                     
+      118 +                b_o *= scale                                  
+      119 +                                                              
+      120 +        tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_c
+          +heck=(0,))                                                    
+      121 +                                                              
+      122 +                                                              
+      123  def chunk_local_cumsum_scalar(
+      124      g,
+      125      chunk_size,
+     ...
+      141      init_device_properties_triton()
+      142      grid = (get_vectorcore_num(), )
+      143  
+      144 +    has_scale = scale is not None                             
+      145 +                                                              
+      146      if cu_seqlens is not None:
+      108 -        # Compute total_chunks on CPU with minimal overhead (n
+          -o tensor creation)                                            
+      147          cu_list = cu_seqlens.tolist()
+      148          seq_count = len(cu_list) - 1
+      111 -        total_chunks = sum((cu_list[i+1] - cu_list[i] + chunk_
+          -size - 1) // chunk_size for i in range(seq_count))            
+      149 +                                                              
+      150 +        if seq_count == 1:                                    
+      151 +            # Single sequence optimization: avoid sequence sea
+          +rch entirely                                                  
+      152 +            total_T = cu_list[1] - cu_list[0]                 
+      153 +            total_chunks = (total_T + chunk_size - 1) // chunk
+          +_size                                                         
+      154 +            bos = cu_list[0]                                  
+      155 +            chunk_local_cumsum_simple_kernel[grid](           
+      156 +                s=g_org.data_ptr() + bos * H * g_org.element_s
+          +ize(),                                                        
+      157 +                o=g.data_ptr() + bos * H * g.element_size(),  
+      158 +                scale=scale,                                  
+      159 +                total_T=total_T,                              
+      160 +                total_chunks=total_chunks,                    
+      161 +                H=H,                                          
+      162 +                CHUNK_SIZE=chunk_size,                        
+      163 +                HEAD_FIRST=head_first,                        
+      164 +                REVERSE=reverse,                              
+      165 +                HAS_SCALE=has_scale,                          
+      166 +            )                                                 
+      167 +        else:                                                 
+      168 +            total_chunks = sum((cu_list[i+1] - cu_list[i] + ch
+          +unk_size - 1) // chunk_size for i in range(seq_count))        
+      169 +            chunk_local_cumsum_scalar_kernel[grid](           
+      170 +                s=g_org,                                      
+      171 +                o=g,                                          
+      172 +                scale=scale,                                  
+      173 +                cu_seqlens=cu_seqlens,                        
+      174 +                T=T,                                          
+      175 +                total_chunks=total_chunks,                    
+      176 +                seq_count=seq_count,                          
+      177 +                H=H,                                          
+      178 +                CHUNK_SIZE=chunk_size,                        
+      179 +                HEAD_FIRST=head_first,                        
+      180 +                REVERSE=reverse,                              
+      181 +                HAS_SCALE=has_scale,                          
+      182 +                IS_VARLEN=True,                               
+      183 +            )                                                 
+      184      else:
+      113 -        seq_count = B                                         
+      114 -        total_chunks = triton.cdiv(T, chunk_size) * B         
+      185 +        if B == 1:                                            
+      186 +            total_chunks = triton.cdiv(T, chunk_size)         
+      187 +            chunk_local_cumsum_simple_kernel[grid](           
+      188 +                s=g_org,                                      
+      189 +                o=g,                                          
+      190 +                scale=scale,                                  
+      191 +                total_T=T,                                    
+      192 +                total_chunks=total_chunks,                    
+      193 +                H=H,                                          
+      194 +                CHUNK_SIZE=chunk_size,                        
+      195 +                HEAD_FIRST=head_first,                        
+      196 +                REVERSE=reverse,                              
+      197 +                HAS_SCALE=has_scale,                          
+      198 +            )                                                 
+      199 +        else:                                                 
+      200 +            total_chunks = triton.cdiv(T, chunk_size) * B     
+      201 +            chunk_local_cumsum_scalar_kernel[grid](           
+      202 +                s=g_org,                                      
+      203 +                o=g,                                          
+      204 +                scale=scale,                                  
+      205 +                cu_seqlens=None,                              
+      206 +                T=T,                                          
+      207 +                total_chunks=total_chunks,                    
+      208 +                seq_count=B,                                  
+      209 +                H=H,                                          
+      210 +                CHUNK_SIZE=chunk_size,                        
+      211 +                HEAD_FIRST=head_first,                        
+      212 +                REVERSE=reverse,                              
+      213 +                HAS_SCALE=has_scale,                          
+      214 +                IS_VARLEN=False,                              
+      215 +            )                                                 
+      216  
+      116 -    chunk_local_cumsum_scalar_kernel[grid](                   
+      117 -        s=g_org,                                              
+      118 -        o=g,                                                  
+      119 -        scale=scale,                                          
+      120 -        cu_seqlens=cu_seqlens,                                
+      121 -        T=T,                                                  
+      122 -        total_chunks=total_chunks,                            
+      123 -        seq_count=seq_count,                                  
+      124 -        H=H,                                                  
+      125 -        CHUNK_SIZE=chunk_size,                                
+      126 -        HEAD_FIRST=head_first,                                
+      127 -        REVERSE=reverse,                                      
+      128 -        HAS_SCALE=scale is not None,                          
+      129 -        IS_VARLEN=cu_seqlens is not None,                     
+      130 -    )                                                         
+      217      return g
+      218  
+      219  
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  <frozen importlib._bootstrap>:241
+       <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type
+     SwigPyObject has no __module__ attribute
+     … +31 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 全部失败。看错误信息：
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿                             module_map=module_map)
+     E       triton.compiler.errors.CompilationError: at 28:20:
+     E           for ci in range(pid, total_chunks, NUM_CORE):
+     … +24 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+● 问题出在传入 data_ptr() 返回的是 int，不是指针类型。tl.make_block_ptr 需要
+  tensor 指针。需要改用 tensor 传入方式。回到 V5 的方式传入
+  tensor，但对单序列跳过搜索循环：
+
+● Write(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 57 lines, removed 81 lines
+      17  from vllm_ascend.ops.triton.triton_utils import get_vectorcore_
+          num
+      18  
+      19  
+      20 -@triton.jit(do_not_specialize=["T", "total_chunks", "seq_count"
+         -])                                                             
+      21 -def chunk_local_cumsum_scalar_kernel(                          
+      20 +@triton.jit(do_not_specialize=["total_T", "total_chunks", "bos_
+         +offset"])                                                      
+      21 +def chunk_local_cumsum_simple_kernel(                          
+      22      s,
+      23      o,
+      24      scale,
+      25 -    cu_seqlens,                                                
+      26 -    T,                                                         
+      25 +    total_T,                                                   
+      26      total_chunks,
+      28 -    seq_count,                                                 
+      27 +    bos_offset,                                                
+      28      H: tl.constexpr,
+      29      CHUNK_SIZE: tl.constexpr,
+      30      REVERSE: tl.constexpr,
+      31      HAS_SCALE: tl.constexpr,
+      33 -    IS_VARLEN: tl.constexpr,                                   
+      32      HEAD_FIRST: tl.constexpr,
+      33  ):
+      34 +    """Optimized kernel for single-sequence cases (no sequence 
+         +search needed)."""                                             
+      35      pid = tl.program_id(0)
+      36      NUM_CORE = tl.num_programs(0)
+      37  
+      38      for ci in range(pid, total_chunks, NUM_CORE):
+      40 -        if IS_VARLEN:                                          
+      41 -            # Find which sequence this chunk belongs to        
+      42 -            bos = 0                                            
+      43 -            cur_T = 0                                          
+      44 -            i_chunk = ci                                       
+      45 -            remaining = ci                                     
+      46 -            for s_idx in range(seq_count):                     
+      47 -                s_bos = tl.load(cu_seqlens + s_idx).to(tl.int32
+         -)                                                              
+      48 -                s_eos = tl.load(cu_seqlens + s_idx + 1).to(tl.i
+         -nt32)                                                          
+      49 -                s_len = s_eos - s_bos                          
+      50 -                s_nchunks = tl.cdiv(s_len, CHUNK_SIZE)         
+      51 -                if remaining >= 0 and remaining < s_nchunks:   
+      52 -                    bos = s_bos                                
+      53 -                    cur_T = s_len                              
+      54 -                    i_chunk = remaining                        
+      55 -                    remaining = -1                             
+      56 -                elif remaining >= 0:                           
+      57 -                    remaining = remaining - s_nchunks          
+      58 -        else:                                                  
+      59 -            chunks_per_seq = tl.cdiv(T, CHUNK_SIZE)            
+      60 -            i_b = ci // chunks_per_seq                         
+      61 -            i_chunk = ci % chunks_per_seq                      
+      62 -            bos = i_b * T                                      
+      63 -            cur_T = T                                          
+      39 +        chunk_start = ci * CHUNK_SIZE                          
+      40  
+      65 -        chunk_start = i_chunk * CHUNK_SIZE                     
+      66 -                                                               
+      41          if HEAD_FIRST:
+      68 -            ptr_s = tl.make_block_ptr(s + bos * H, (H, cur_T), 
+         -(cur_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))         
+      69 -            ptr_o = tl.make_block_ptr(o + bos * H, (H, cur_T), 
+         -(cur_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))         
+      42 +            ptr_s = tl.make_block_ptr(s + bos_offset * H, (H, t
+         +otal_T), (total_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0
+         +))                                                             
+      43 +            ptr_o = tl.make_block_ptr(o + bos_offset * H, (H, t
+         +otal_T), (total_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0
+         +))                                                             
+      44              b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.flo
+          at32)
+      45              b_o = tl.cumsum(b_s, axis=1, reverse=REVERSE)
+      46              if HAS_SCALE:
+      47                  b_o *= scale
+      48          else:
+      75 -            ptr_s = tl.make_block_ptr(s + bos * H, (cur_T, H), 
+         -(H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))             
+      76 -            ptr_o = tl.make_block_ptr(o + bos * H, (cur_T, H), 
+         -(H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))             
+      49 +            ptr_s = tl.make_block_ptr(s + bos_offset * H, (tota
+         +l_T, H), (H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))    
+      50 +            ptr_o = tl.make_block_ptr(o + bos_offset * H, (tota
+         +l_T, H), (H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))    
+      51              b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.flo
+          at32)
+      52              b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+      53              if HAS_SCALE:
+     ...
+       56          tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_c
+           heck=(0,))
+       57  
+       58  
+       85 -@triton.jit(do_not_specialize=["total_T", "total_chunks"])    
+       86 -def chunk_local_cumsum_simple_kernel(                         
+       59 +@triton.jit(do_not_specialize=["T", "total_chunks", "seq_count
+          +"])                                                           
+       60 +def chunk_local_cumsum_scalar_kernel(                         
+       61      s,
+       62      o,
+       63      scale,
+       90 -    total_T,                                                  
+       64 +    cu_seqlens,                                               
+       65 +    T,                                                        
+       66      total_chunks,
+       67 +    seq_count,                                                
+       68      H: tl.constexpr,
+       69      CHUNK_SIZE: tl.constexpr,
+       70      REVERSE: tl.constexpr,
+       71      HAS_SCALE: tl.constexpr,
+       72      HEAD_FIRST: tl.constexpr,
+       73  ):
+       98 -    """Simplified kernel for single-sequence or non-varlen cas
+          -es."""                                                        
+       74      pid = tl.program_id(0)
+       75      NUM_CORE = tl.num_programs(0)
+       76  
+       77      for ci in range(pid, total_chunks, NUM_CORE):
+      103 -        chunk_start = ci * CHUNK_SIZE                         
+       78 +        # Find which sequence this chunk belongs to           
+       79 +        bos = 0                                               
+       80 +        cur_T = 0                                             
+       81 +        i_chunk = ci                                          
+       82 +        remaining = ci                                        
+       83 +        for s_idx in range(seq_count):                        
+       84 +            s_bos = tl.load(cu_seqlens + s_idx).to(tl.int32)  
+       85 +            s_eos = tl.load(cu_seqlens + s_idx + 1).to(tl.int3
+          +2)                                                            
+       86 +            s_len = s_eos - s_bos                             
+       87 +            s_nchunks = tl.cdiv(s_len, CHUNK_SIZE)            
+       88 +            if remaining >= 0 and remaining < s_nchunks:      
+       89 +                bos = s_bos                                   
+       90 +                cur_T = s_len                                 
+       91 +                i_chunk = remaining                           
+       92 +                remaining = -1                                
+       93 +            elif remaining >= 0:                              
+       94 +                remaining = remaining - s_nchunks             
+       95  
+       96 +        chunk_start = i_chunk * CHUNK_SIZE                    
+       97 +                                                              
+       98          if HEAD_FIRST:
+      106 -            ptr_s = tl.make_block_ptr(s, (H, total_T), (total_
+          -T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))             
+      107 -            ptr_o = tl.make_block_ptr(o, (H, total_T), (total_
+          -T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))             
+       99 +            ptr_s = tl.make_block_ptr(s + bos * H, (H, cur_T),
+          + (cur_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))       
+      100 +            ptr_o = tl.make_block_ptr(o + bos * H, (H, cur_T),
+          + (cur_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0))       
+      101              b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.fl
+           oat32)
+      102              b_o = tl.cumsum(b_s, axis=1, reverse=REVERSE)
+      103              if HAS_SCALE:
+      104                  b_o *= scale
+      105          else:
+      113 -            ptr_s = tl.make_block_ptr(s, (total_T, H), (H, 1),
+          - (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))                   
+      114 -            ptr_o = tl.make_block_ptr(o, (total_T, H), (H, 1),
+          - (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))                   
+      106 +            ptr_s = tl.make_block_ptr(s + bos * H, (cur_T, H),
+          + (H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))           
+      107 +            ptr_o = tl.make_block_ptr(o + bos * H, (cur_T, H),
+          + (H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))           
+      108              b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.fl
+           oat32)
+      109              b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+      110              if HAS_SCALE:
+     ...
+      141          seq_count = len(cu_list) - 1
+      142  
+      143          if seq_count == 1:
+      151 -            # Single sequence optimization: avoid sequence sea
+          -rch entirely                                                  
+      144 +            # Single sequence: skip sequence search in kernel 
+      145              total_T = cu_list[1] - cu_list[0]
+      146              total_chunks = (total_T + chunk_size - 1) // chunk
+           _size
+      154 -            bos = cu_list[0]                                  
+      147 +            bos_offset = cu_list[0]                           
+      148              chunk_local_cumsum_simple_kernel[grid](
+      156 -                s=g_org.data_ptr() + bos * H * g_org.element_s
+          -ize(),                                                        
+      157 -                o=g.data_ptr() + bos * H * g.element_size(),  
+      149 +                s=g_org,                                      
+      150 +                o=g,                                          
+      151                  scale=scale,
+      152                  total_T=total_T,
+      153                  total_chunks=total_chunks,
+      154 +                bos_offset=bos_offset,                        
+      155                  H=H,
+      156                  CHUNK_SIZE=chunk_size,
+      157                  HEAD_FIRST=head_first,
+     ...
+      173                  HEAD_FIRST=head_first,
+      174                  REVERSE=reverse,
+      175                  HAS_SCALE=has_scale,
+      182 -                IS_VARLEN=True,                               
+      176              )
+      177      else:
+      185 -        if B == 1:                                            
+      186 -            total_chunks = triton.cdiv(T, chunk_size)         
+      187 -            chunk_local_cumsum_simple_kernel[grid](           
+      188 -                s=g_org,                                      
+      189 -                o=g,                                          
+      190 -                scale=scale,                                  
+      191 -                total_T=T,                                    
+      192 -                total_chunks=total_chunks,                    
+      193 -                H=H,                                          
+      194 -                CHUNK_SIZE=chunk_size,                        
+      195 -                HEAD_FIRST=head_first,                        
+      196 -                REVERSE=reverse,                              
+      197 -                HAS_SCALE=has_scale,                          
+      198 -            )                                                 
+      199 -        else:                                                 
+      200 -            total_chunks = triton.cdiv(T, chunk_size) * B     
+      201 -            chunk_local_cumsum_scalar_kernel[grid](           
+      202 -                s=g_org,                                      
+      203 -                o=g,                                          
+      204 -                scale=scale,                                  
+      205 -                cu_seqlens=None,                              
+      206 -                T=T,                                          
+      207 -                total_chunks=total_chunks,                    
+      208 -                seq_count=B,                                  
+      209 -                H=H,                                          
+      210 -                CHUNK_SIZE=chunk_size,                        
+      211 -                HEAD_FIRST=head_first,                        
+      212 -                REVERSE=reverse,                              
+      213 -                HAS_SCALE=has_scale,                          
+      214 -                IS_VARLEN=False,                              
+      215 -            )                                                 
+      178 +        total_chunks = triton.cdiv(T, chunk_size) * B         
+      179 +        chunk_local_cumsum_simple_kernel[grid](               
+      180 +            s=g_org,                                          
+      181 +            o=g,                                              
+      182 +            scale=scale,                                      
+      183 +            total_T=T * B,                                    
+      184 +            total_chunks=total_chunks,                        
+      185 +            bos_offset=0,                                     
+      186 +            H=H,                                              
+      187 +            CHUNK_SIZE=chunk_size,                            
+      188 +            HEAD_FIRST=head_first,                            
+      189 +            REVERSE=reverse,                                  
+      190 +            HAS_SCALE=has_scale,                              
+      191 +        )                                                     
+      192  
+      193      return g
+      194  
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     -cu_seqlens[0, 31]-torch.float16] PASSED [ 23%]
+     test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     … +30 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 17 项全通过！性能测试：
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:51:26 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:51:26 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:52:34 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:52:34 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:53:46 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:53:46 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● V6b 约 0.254~0.266 ms，相比基线 0.774 ms，加速比 ~2.95x！保存并继续优化：
+
+● Bash(cp /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum_v6b_good.py)
+  ⎿  Done
+
+● 当前耗时约 0.26 ms，其中 host 端约 0.04 ms，kernel 约 0.22 ms。继续分析 kernel
+   优化空间。
+
+  110 个 chunks，40 个核，每核 ≈ 2.75 个 chunks，每个 chunk 的数据量 64*8 = 512
+  elements。这非常小，几乎全被 kernel launch 和循环控制开销主导。
+
+  尝试 V7：增大每次处理的 block 大小——将多个 chunks 合并为一个大 block
+  处理（类似原始方案但用 2D cumsum）。由于 cumsum 在每个 chunk 内独立执行，一次
+  load 多个 chunks 的数据，然后做 reshape + cumsum。
+
+● Write(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 41 lines, removed 19 lines
+      17  from vllm_ascend.ops.triton.triton_utils import get_vectorcore_
+          num
+      18  
+      19  
+      20 -@triton.jit(do_not_specialize=["total_T", "total_chunks", "bos_
+         -offset"])                                                      
+      21 -def chunk_local_cumsum_simple_kernel(                          
+      20 +@triton.jit(do_not_specialize=["total_T", "total_blocks", "bos_
+         +offset"])                                                      
+      21 +def chunk_local_cumsum_block_kernel(                           
+      22      s,
+      23      o,
+      24      scale,
+      25      total_T,
+      26 -    total_chunks,                                              
+      26 +    total_blocks,                                              
+      27      bos_offset,
+      28      H: tl.constexpr,
+      29 +    BLOCK_T: tl.constexpr,                                     
+      30      CHUNK_SIZE: tl.constexpr,
+      31      REVERSE: tl.constexpr,
+      32      HAS_SCALE: tl.constexpr,
+      33      HEAD_FIRST: tl.constexpr,
+      34  ):
+      34 -    """Optimized kernel for single-sequence cases (no sequence 
+         -search needed)."""                                             
+      35 +    """Optimized kernel processing multiple chunks per block.""
+         +"                                                              
+      36      pid = tl.program_id(0)
+      37      NUM_CORE = tl.num_programs(0)
+      38 +    N_CHUNKS: tl.constexpr = BLOCK_T // CHUNK_SIZE             
+      39  
+      38 -    for ci in range(pid, total_chunks, NUM_CORE):              
+      39 -        chunk_start = ci * CHUNK_SIZE                          
+      40 +    for bi in range(pid, total_blocks, NUM_CORE):              
+      41 +        block_start = bi * BLOCK_T                             
+      42  
+      43          if HEAD_FIRST:
+      42 -            ptr_s = tl.make_block_ptr(s + bos_offset * H, (H, t
+         -otal_T), (total_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0
+         -))                                                             
+      43 -            ptr_o = tl.make_block_ptr(o + bos_offset * H, (H, t
+         -otal_T), (total_T, 1), (0, chunk_start), (H, CHUNK_SIZE), (1, 0
+         -))                                                             
+      44 +            ptr_s = tl.make_block_ptr(s + bos_offset * H, (H, t
+         +otal_T), (total_T, 1), (0, block_start), (H, BLOCK_T), (1, 0)) 
+      45 +            ptr_o = tl.make_block_ptr(o + bos_offset * H, (H, t
+         +otal_T), (total_T, 1), (0, block_start), (H, BLOCK_T), (1, 0)) 
+      46              b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.flo
+          at32)
+      45 -            b_o = tl.cumsum(b_s, axis=1, reverse=REVERSE)      
+      47 +            b_s = tl.reshape(b_s, (H, N_CHUNKS, CHUNK_SIZE))   
+      48 +            b_s = tl.trans(b_s, (2, 0, 1))                     
+      49 +            b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)      
+      50              if HAS_SCALE:
+      51                  b_o *= scale
+      52 +            b_o = tl.trans(b_o, (2, 0, 1))                     
+      53 +            b_o = tl.reshape(b_o, (H, BLOCK_T))                
+      54          else:
+      49 -            ptr_s = tl.make_block_ptr(s + bos_offset * H, (tota
+         -l_T, H), (H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))    
+      50 -            ptr_o = tl.make_block_ptr(o + bos_offset * H, (tota
+         -l_T, H), (H, 1), (chunk_start, 0), (CHUNK_SIZE, H), (1, 0))    
+      55 +            ptr_s = tl.make_block_ptr(s + bos_offset * H, (tota
+         +l_T, H), (H, 1), (block_start, 0), (BLOCK_T, H), (1, 0))       
+      56 +            ptr_o = tl.make_block_ptr(o + bos_offset * H, (tota
+         +l_T, H), (H, 1), (block_start, 0), (BLOCK_T, H), (1, 0))       
+      57              b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.flo
+          at32)
+      58 +            b_s = tl.reshape(b_s, (N_CHUNKS, CHUNK_SIZE, H))   
+      59 +            b_s = tl.trans(b_s, (1, 0, 2))                     
+      60              b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+      61              if HAS_SCALE:
+      62                  b_o *= scale
+      63 +            b_o = tl.trans(b_o, (1, 0, 2))                     
+      64 +            b_o = tl.reshape(b_o, (BLOCK_T, H))                
+      65  
+      66          tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_ch
+          eck=(0,))
+      67  
+     ...
+      85      NUM_CORE = tl.num_programs(0)
+      86  
+      87      for ci in range(pid, total_chunks, NUM_CORE):
+      78 -        # Find which sequence this chunk belongs to            
+      88          bos = 0
+      89          cur_T = 0
+      90          i_chunk = ci
+     ...
+      145  
+      146      has_scale = scale is not None
+      147  
+      148 +    # Calculate optimal block size for multi-chunk processing 
+      149 +    # UB budget: ~85KB, S_token per element = 4 bytes (float32
+          +) * 2 (load+store)                                            
+      150 +    # Per chunk: CHUNK_SIZE * H * 4 * 2 bytes + reshape overhe
+          +ad                                                            
+      151 +    # Using 3x for safety (load + compute + store): CHUNK_SIZE
+          + * H * 4 * 3                                                  
+      152 +    ub_budget = 85 * 1024                                     
+      153 +    chunk_ub_cost = chunk_size * H * 4 * 3  # conservative est
+          +imate                                                         
+      154 +    n_chunks_per_block = ub_budget // chunk_ub_cost           
+      155 +    # Clamp to power of 2 for reshape compatibility           
+      156 +    n_chunks_per_block = 1 << (n_chunks_per_block.bit_length()
+          + - 1) if n_chunks_per_block > 0 else 1                        
+      157 +    n_chunks_per_block = max(1, min(n_chunks_per_block, 8))  #
+          + cap at 8 for reasonable block sizes                          
+      158 +    BLOCK_T = chunk_size * n_chunks_per_block                 
+      159 +                                                              
+      160      if cu_seqlens is not None:
+      161          cu_list = cu_seqlens.tolist()
+      162          seq_count = len(cu_list) - 1
+      163  
+      164          if seq_count == 1:
+      144 -            # Single sequence: skip sequence search in kernel 
+      165              total_T = cu_list[1] - cu_list[0]
+      146 -            total_chunks = (total_T + chunk_size - 1) // chunk
+          -_size                                                         
+      166              bos_offset = cu_list[0]
+      148 -            chunk_local_cumsum_simple_kernel[grid](           
+      167 +            total_blocks = (total_T + BLOCK_T - 1) // BLOCK_T 
+      168 +            chunk_local_cumsum_block_kernel[grid](            
+      169                  s=g_org,
+      170                  o=g,
+      171                  scale=scale,
+      172                  total_T=total_T,
+      153 -                total_chunks=total_chunks,                    
+      173 +                total_blocks=total_blocks,                    
+      174                  bos_offset=bos_offset,
+      175                  H=H,
+      176 +                BLOCK_T=BLOCK_T,                              
+      177                  CHUNK_SIZE=chunk_size,
+      178                  HEAD_FIRST=head_first,
+      179                  REVERSE=reverse,
+     ...
+      196                  HAS_SCALE=has_scale,
+      197              )
+      198      else:
+      178 -        total_chunks = triton.cdiv(T, chunk_size) * B         
+      179 -        chunk_local_cumsum_simple_kernel[grid](               
+      199 +        total_blocks = triton.cdiv(T, BLOCK_T) * B            
+      200 +        chunk_local_cumsum_block_kernel[grid](                
+      201              s=g_org,
+      202              o=g,
+      203              scale=scale,
+      204              total_T=T * B,
+      184 -            total_chunks=total_chunks,                        
+      205 +            total_blocks=total_blocks,                        
+      206              bos_offset=0,
+      207              H=H,
+      208 +            BLOCK_T=BLOCK_T,                                  
+      209              CHUNK_SIZE=chunk_size,
+      210              HEAD_FIRST=head_first,
+      211              REVERSE=reverse,
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     -cu_seqlens[0, 31]-torch.float16] PASSED [ 23%]
+     test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     … +30 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 12:58:03 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 12:58:03 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● V7 (0.272 ms) 与 V6b (0.260 ms) 相当，multi-chunk block 处理引入的
+  reshape/transpose 开销抵消了减少循环次数的收益。回到 V6b，它更简洁且性能更好：
+
+● Bash(cp
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum_v6b_good.py
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Done
+
+● 让我尝试最后一个优化方向：减少 cu_seqlens.tolist() 的开销（同步操作）。对于
+  B=1 的情况，可以用 g.shape[1] 直接获取 T_total，不需要同步。
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 4 lines, removed 5 lines
+      137      has_scale = scale is not None
+      138  
+      139      if cu_seqlens is not None:
+      140 -        cu_list = cu_seqlens.tolist()                         
+      141 -        seq_count = len(cu_list) - 1                          
+      140 +        seq_count = len(cu_seqlens) - 1                       
+      141  
+      142          if seq_count == 1:
+      144 -            # Single sequence: skip sequence search in kernel 
+      145 -            total_T = cu_list[1] - cu_list[0]                 
+      143 +            # Single sequence: use T from shape directly (avoi
+          +ds GPU sync from .tolist())                                   
+      144 +            total_T = T  # T is already extracted from g.shape
+      145              total_chunks = (total_T + chunk_size - 1) // chunk
+           _size
+      147 -            bos_offset = cu_list[0]                           
+      146 +            bos_offset = 0  # B=1 assertion ensures bos=0     
+      147              chunk_local_cumsum_simple_kernel[grid](
+      148                  s=g_org,
+      149                  o=g,
+
+● Also fix the multi-sequence path:
+
+● Update(vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py)
+  ⎿  Added 1 line
+      158                  HAS_SCALE=has_scale,
+      159              )
+      160          else:
+      161 +            cu_list = cu_seqlens.tolist()                     
+      162              total_chunks = sum((cu_list[i+1] - cu_list[i] + ch
+           unk_size - 1) // chunk_size for i in range(seq_count))
+      163              chunk_local_cumsum_scalar_kernel[grid](
+      164                  s=g_org,
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     -cu_seqlens[0, 31]-torch.float16] PASSED [ 23%]
+     test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     … +30 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 13:01:50 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 13:01:50 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 13:03:06 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 13:03:06 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 13:04:16 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 13:04:16 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 🚀 V8 约 0.161~0.162 ms，相比基线 0.774 ms，加速比达到 ~4.8x！保存该版本：
+
+● Bash(cp /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum_v8_good.py)
+  ⎿  Done
+
+● 现在更新任务状态并完成最终验证：
+● 最终验证
+
+  重新运行完整的正确性验证和性能测试，确认最终结果：
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     -cu_seqlens[0, 31]-torch.float16] PASSED [ 23%]
+     test_chunk/test_cumseum.py::test_accuracy_chunk_varlen[H8-D128-mask_p0
+     … +30 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 13:07:52 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 13:07:52 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(rm -rf ~/.triton/ __pycache__ .pytest_cache extra-info/ && export
+      LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/dr
+      iver/lib64/common:/u…)
+  ⎿  INFO 04-08 13:09:00 [__init__.py:44] Available plugins for group vllm.
+     platform_plugins:
+     INFO 04-08 13:09:00 [__init__.py:46] - ascend -> vllm_ascend:register
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 最终查看优化后的代码全貌：
+
+  Read 1 file (ctrl+o to expand)
+
+● 清理临时文件：
+
+● Bash(rm -f
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py.bak
+      /vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum_v2_good.py
+      /vllm-worksp…)
+  ⎿  Done
+
+● ---
+  优化结果报告
+
+  算子信息
+
+  - 算子名称：chunk_local_cumsum_scalar
+  - 源文件：/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/fla/cumsum.py
+
+  性能对比
+
+  ┌───────────────┬─────────────────┬────────┐
+  │ 基线耗时 (ms) │ 优化后耗时 (ms) │ 加速比 │
+  ├───────────────┼─────────────────┼────────┤
+  │ 0.774         │ 0.161           │ 4.81x  │
+  └───────────────┴─────────────────┴────────┘
+
+  优化技术清单
+
+  1. [已应用] 固定 Grid 大小：将 grid = (num_blocks, B) 改为 grid = 
+  (get_vectorcore_num(), ) = (40,)，按规范使用固定 1D Grid，kernel
+  内通过循环处理多个 chunks
+  2. [已应用] Chunk 粒度并行：将工作单元从 BLOCK_T=512 个 tokens 细化为
+  CHUNK_SIZE=64 个 tokens，使 110 个 chunks 在 40 个核上更均匀分配（每核 ~2.75
+  个 chunks），提升并行度
+  3. [已应用] 消除 3D reshape/transpose：原始 kernel 需要 reshape(N_CHUNKS, 
+  CHUNK_SIZE, H) + trans(1,0,2) + cumsum + trans(1,0,2) + reshape；优化后直接在
+  2D (CHUNK_SIZE, H) tensor 上 cumsum(axis=0)，大幅减少 Vector 计算开销
+  4. [已应用] 消除 Host 端 prepare_chunk_indices 开销：原始方案每次调用都执行
+  prepare_chunk_indices（~0.49 ms），优化后使用 len(cu_seqlens)
+  和形状信息直接计算（~0 ms），避免 GPU 同步
+  5. [已应用] 单序列路径特化：为 seq_count==1 提供简化 kernel
+  chunk_local_cumsum_simple_kernel，完全消除 kernel 内的序列查找循环，减少
+  Scalar 计算
+  6. [已应用] 避免 GPU 同步：对 B=1 单序列场景，使用 g.shape 中的 T 替代
+  cu_seqlens.tolist()，避免 NPU→CPU 数据同步开销（~0.04 ms）
+  7. [已应用] do_not_specialize 避免重编译：对 total_T, total_chunks, bos_offset
+   等可变标量参数使用 do_not_specialize，避免因值变化触发重编译
+  8. [已应用] 使用 make_block_ptr + boundary_check：替代手动 mask 计算，避免破坏
+   MTE/Vector 流水并行
+
+  关键修改说明
+
+  - 修改点 1：重构 Grid 策略——从数据形状相关的 2D Grid (num_blocks, B)
+  改为固定大小 1D Grid (get_vectorcore_num(), )，kernel 内通过 range(pid, 
+  total_chunks, NUM_CORE) 循环分配任务
+  - 修改点 2：拆分为两个
+  kernel——chunk_local_cumsum_simple_kernel（单序列/非变长快速路径）和
+  chunk_local_cumsum_scalar_kernel（多序列变长路径），根据 seq_count 在 Host
+  端选择调度
+  - 修改点 3：Host 端计算最小化——单序列场景完全零开销（仅用 len()
+  和整数运算），多序列场景仅需 cu_seqlens.tolist() + Python 整数运算
+  - 修改点 4：Kernel 内计算简化——每个 chunk 仅需 make_block_ptr → tl.load →
+  tl.cumsum → tl.store，无 reshape/transpose 操作
+
+  迭代优化记录
+
+  ┌──────┬───────────┬────────┬──────────────────────────────────────┐
+  │ 版本 │ 耗时 (ms) │ 加速比 │               核心变更               │
+  ├──────┼───────────┼────────┼──────────────────────────────────────┤
+  │ 基线 │ 0.774     │ 1.0x   │ 原始实现                             │
+  ├──────┼───────────┼────────┼──────────────────────────────────────┤
+  │ V1   │ 0.724     │ 1.07x  │ 固定 Grid + 核内循环                 │
+  ├──────┼───────────┼────────┼──────────────────────────────────────┤
+  │ V2   │ 0.570     │ 1.36x  │ Chunk 粒度 + 消除 reshape/transpose  │
+  ├──────┼───────────┼────────┼──────────────────────────────────────┤
+  │ V4   │ 0.394     │ 1.96x  │ CPU 端快速计算 + chunk_cumsum tensor │
+  ├──────┼───────────┼────────┼──────────────────────────────────────┤
+  │ V5   │ 0.272     │ 2.85x  │ 消除 chunk_cumsum tensor 创建        │
+  ├──────┼───────────┼────────┼──────────────────────────────────────┤
+  │ V6b  │ 0.260     │ 2.98x  │ 单序列 kernel 特化                   │
+  ├──────┼───────────┼────────┼──────────────────────────────────────┤
+  │ V8   │ 0.161     │ 4.81x  │ 避免 GPU 同步 (消除 .tolist())       │
+  └──────┴───────────┴────────┴──────────────────────────────────────┘
+
+✻ Cogitated for 1h 12m 16s
