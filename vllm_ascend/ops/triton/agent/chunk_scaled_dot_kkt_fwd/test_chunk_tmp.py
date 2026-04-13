@@ -23,20 +23,20 @@ beta = torch.randn(B, T, H, device=device, dtype=dtype)
 g_cumsum = -torch.abs(torch.randn(B, T, H, device=device, dtype=dtype))
 
 # Warmup (10 iterations)
-for _ in range(10):
-    A = chunk_scaled_dot_kkt_fwd(
-        k=k, beta=beta, g_cumsum=g_cumsum,
-        cu_seqlens=None, chunk_indices=None,
-        chunk_size=BT, output_dtype=torch.float32,
-    )
+# for _ in range(10):
+#     A = chunk_scaled_dot_kkt_fwd(
+#         k=k, beta=beta, g_cumsum=g_cumsum,
+#         cu_seqlens=None, chunk_indices=None,
+#         chunk_size=BT, output_dtype=torch.float32,
+#     )
 torch.npu.synchronize()
 
 # Measure (20 iterations for msprof to capture)
 torch.npu.synchronize()
-for _ in range(20):
-    A = chunk_scaled_dot_kkt_fwd(
-        k=k, beta=beta, g_cumsum=g_cumsum,
-        cu_seqlens=None, chunk_indices=None,
-        chunk_size=BT, output_dtype=torch.float32,
-    )
+# for _ in range(20):
+A = chunk_scaled_dot_kkt_fwd(
+    k=k, beta=beta, g_cumsum=g_cumsum,
+    cu_seqlens=None, chunk_indices=None,
+    chunk_size=BT, output_dtype=torch.float32,
+)
 torch.npu.synchronize()
