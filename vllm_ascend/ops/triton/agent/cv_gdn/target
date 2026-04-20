@@ -1,6 +1,6 @@
 把 https://github.com/Fager10086/vllm-ascend/tree/ops_agent/vllm_ascend/ops/triton/agent/cv_gdn/fla 的整个fla目录替换掉当前的同名目录，
 
-目标：给agent一个cv优化样例：一个grid改造前的cv算子A、算子A的grid改造版本；并给一个我们要优化的目标算子。期望agent能够从样例中学习优化方法并改造当前算子
+目标：给agent一个cv优化样例：一个grid改造前的cv算子A、算子A的grid改造版本；并给一个我们要优化的目标算子。期望agent能够从样例中学习优化方法并改造当前算子。
 
 输入：改造前的样例算子为当前fla目录下的vllm_ascend/ops/triton/fla/chunk_scaled_dot_kkt.py，改造后的样例算子为
 https://github.com/vllm-project/vllm-ascend/pull/8386/changes#diff-666fe78524fab4c0b87c7c05add86183509329ef0390a0149685cdc3d8d83604这个PR里的同名算子。
@@ -8,5 +8,7 @@ https://github.com/vllm-project/vllm-ascend/pull/8386/changes#diff-666fe78524fab
 
 我们希望他能达到https://github.com/vllm-project/vllm-ascend/pull/8386/changes#diff-666fe78524fab4c0b87c7c05add86183509329ef0390a0149685cdc3d8d83604这个PR里的同名算子改造效果。
 
-
+测试脚本在：https://github.com/Fager10086/vllm-ascend/tree/ops_agent/vllm_ascend/ops/triton/agent/test_chunk，可以拷到机器任意路径下
 精度测试脚本：python -m pytest /vllm-workspace/test_chunk/test_cumseum.py
+性能测试方式：msprof op --output=/home/ --kernel-name="recompute" --warm-up=20 --launch-count=40 pytest /vllm-workspace/test_chunk/test_cumseum.py
+注：当前cv算子即使实现grid改造，性能也不一定会有提升，此次最主要的目的是证明当前skill在同类算子优化上的可行性。
