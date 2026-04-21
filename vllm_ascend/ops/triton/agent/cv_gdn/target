@@ -4,7 +4,7 @@
 
 输入：改造前的样例算子为当前fla目录下的vllm_ascend/ops/triton/fla/chunk_scaled_dot_kkt.py，改造后的样例算子为
 https://github.com/vllm-project/vllm-ascend/pull/8386/changes#diff-666fe78524fab4c0b87c7c05add86183509329ef0390a0149685cdc3d8d83604这个PR里的同名算子。
-目标算子为：vllm_ascend/ops/triton/fla/solve_tril.py。
+目标算子为：vllm_ascend/ops/triton/fla/solve_tril.py的merge_16x16_to_64x64_inverse_kernel。
 
 我们希望他能达到https://github.com/vllm-project/vllm-ascend/pull/8386/changes#diff-666fe78524fab4c0b87c7c05add86183509329ef0390a0149685cdc3d8d83604这个PR里的同名算子改造效果。
 
