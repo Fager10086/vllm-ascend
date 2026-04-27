@@ -89,7 +89,7 @@
 
 ### 3.3 两种模板，覆盖两类算子
 
-实践中，分别在 vllm-ascend 的 CV 融合算子（GDN——Gated Delta Networks 的小算子为例）和纯 Vector 算子（Split_qkv、RMSNorm、RoPE融合算子为例）上进行验证：
+对于不同种类的算子，我们分别为其提供各自类别内的优化模板，在输入原生算子的同时，额外输入相应的优化模板作为参考样例。实践中，分别在 vllm-ascend 的 CV 融合算子（GDN——Gated Delta Networks 的小算子为例）和纯 Vector 算子（Split_qkv、RMSNorm、RoPE融合算子为例）上进行验证：
 
 **CV 算子**（含 `tl.dot` 矩阵运算）——改造仅触碰调度层：
 
@@ -380,9 +380,7 @@ AI Agent → 复制优化模式（规模化执行，低边际成本）
 
 ### 从一个 Skill 到一类方法论
 
-值得强调的是，"专家模板 + Agent 仿照"的思路**并不局限于 `triton-ascend-ops-optimizer` 这一个 Skill**。它本质上揭示的是一条提升 AI Agent 算子开发效果的通用路径：
-
-**任何算子 Skill，只要面临"生成结果泛化性不足"或"输出准确率不稳定"的问题，都可以借鉴同样的策略——用同类优质案例约束 Agent 的行为空间，让它从"自由创造"转向"有范例的精准模仿"。**
+**"专家模板 + Agent 仿照"的思路**并不局限于 `triton-ascend-ops-optimizer` 这一个 Skill**。它也可以在其他算子Skilss的基础上复用，这里提供的是一种优化策略：**
 
 具体而言：
 
