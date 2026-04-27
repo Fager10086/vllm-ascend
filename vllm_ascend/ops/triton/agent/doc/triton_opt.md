@@ -212,7 +212,7 @@ Agent 执行后，重点审视以下内容：
 
 ### Step 1：分类
 
-阅读 `solve_tril.py`，发现 `merge_16x16_to_64x64_inverse_kernel` 包含矩阵分块运算 → 判定为 **CV 算子** → 使用 CV 模板。
+ `solve_tril.py` 中的 `merge_16x16_to_64x64_inverse_kernel` 包含矩阵分块运算 → 判定为 **CV 算子** → 使用 CV 模板。
 
 ### Step 2：准备——专家模板长什么样
 
