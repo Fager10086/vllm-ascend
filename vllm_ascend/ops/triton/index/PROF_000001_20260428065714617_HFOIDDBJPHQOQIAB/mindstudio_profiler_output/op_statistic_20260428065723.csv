@@ -1,0 +1,5 @@
+Device_id,OP Type,Core Type,Count,Total Time(us),Min Time(us),Avg Time(us),Max Time(us),Ratio(%)
+0,LightningIndexer,MIX_AIC,15,8331.58,547.38,555.438,586.64,61.277
+0,DSARandomNormal,DSA_SQE,3,4830.86,25.84,1610.286,3172.24,35.53
+0,Cast,AI_VECTOR_CORE,4,432.78,1.52,108.195,258.3,3.183
+0,DSARandomUniform,DSA_SQE,1,1.46,1.46,1.46,1.46,0.011
