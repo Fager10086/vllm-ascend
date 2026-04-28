@@ -68,7 +68,7 @@
 
 以下对比清晰展示了两种路径的本质差异：
 
-![alt text](image-2.png)
+![端到端自由优化 vs 专家模板+Agent仿照](compare.png)
 
 ### 3.2 正确的路径：给 Agent 一道例题和标准答案
 
@@ -76,7 +76,7 @@
 
 这正是昇腾推理团队在踩坑之后提炼出的核心方法论——**"专家模板 + AI 仿照"**：
 
-![alt text](image.png)
+![专家模板 + AI Agent 仿照改造](flowchart.png)
 
 为什么这行得通？因为它精确地把人和 Agent 摆在了各自最擅长的位置：
 
@@ -211,7 +211,7 @@ Agent 执行后，重点审视以下内容：
 
 以 vllm-ascend 的 GDN 算子之一的 `merge_16x16_to_64x64_inverse_kernel` 为例，按 5 步标准工作流完整走一遍。
 
-![alt text](image-1.png)
+![实战案例全景流程](case_example.png)
 
 ### Step 1：分类
 
