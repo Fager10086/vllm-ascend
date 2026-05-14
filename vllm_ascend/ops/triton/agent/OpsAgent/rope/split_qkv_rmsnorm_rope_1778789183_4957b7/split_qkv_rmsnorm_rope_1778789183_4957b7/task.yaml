@@ -1,0 +1,15 @@
+agent:
+  max_rounds: 5
+  ref_file: reference.py
+arch: ascendascend910
+description: Optimize split_qkv_rmsnorm_rope
+devices:
+- 7
+editable_files:
+- kernel.py
+eval:
+  timeout: 120
+metric:
+  lower_is_better: true
+  primary: latency_us
+name: split_qkv_rmsnorm_rope
