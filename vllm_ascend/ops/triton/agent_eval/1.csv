@@ -1,0 +1,3 @@
+name,kerel_path,golden_path
+l2,test_l2norm.py,/vllm-workspace/test_l2norm.py
+split,/vllm-workspace/test_ropt.py,/vllm-workspace/test_ropt.py
