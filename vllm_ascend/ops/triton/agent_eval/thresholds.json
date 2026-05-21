@@ -1,0 +1,11 @@
+{
+  "pure_vector_compute_bound": 2.0,
+  "pure_vector_memory_bound": 1.5,
+  "pure_cube_compute_bound": 2.0,
+  "pure_cube_memory_bound": 1.5,
+  "cv_cube_bound_compute_bound": 2.5,
+  "cv_cube_bound_memory_bound": 2.0,
+  "cv_vector_bound_compute_bound": 2.5,
+  "cv_vector_bound_memory_bound": 2.0,
+  "default": 2.0
+}
