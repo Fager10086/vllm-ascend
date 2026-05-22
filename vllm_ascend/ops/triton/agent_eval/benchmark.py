@@ -12,25 +12,56 @@
 #   python3 benchmark.py tasks.csv
 #   python3 benchmark.py tasks.csv -o report.csv --result-dir ./prof_result
 #
-# 流程:
-#   1. 按 kernel_path 分组，每个 kernel_path 只运行一次 msprof
-#   2. 从 msprof 产出的 op_summary CSV 中检索各 kernel_name 的实测性能
-#   3. 运行理论极限性能脚本 (当前用随机数模拟)
-#   4. 按阈值分拣, 输出三个 CSV:
-#      - 全量对比表
-#      - ratio >= 阈值 (性能未达标)
-#      - ratio <  阈值 (性能达标)
+# 阈值配置:
+#   脚本会根据理论建模输出自动判断算子类型, 不同类型使用不同阈值.
+#   算子类型分类:
+#     - pure_vector       : 纯 Vector 算子 (仅 AIV time != 0)
+#     - pure_cube         : 纯 Cube 算子 (仅 AIC time != 0)
+#     - cv_cube_bound     : CV 融合, Cube Bound (AIC time > AIV time)
+#     - cv_vector_bound   : CV 融合, Vector Bound (AIV time >= AIC time)
+#   每种类型进一步区分搬运 Bound / 计算 Bound:
+#     - Vector: AIV time > AIV VEC → 搬运 Bound, 否则计算 Bound
+#     - Cube:   AIC time > AIC CUBE → 搬运 Bound, 否则计算 Bound
+#
+#   可通过 --threshold-config JSON 文件自定义各类型阈值, 格式:
+#   {
+#     "pure_vector_compute_bound": 2.0,
+#     "pure_vector_memory_bound": 1.5,
+#     "pure_cube_compute_bound": 2.0,
+#     "pure_cube_memory_bound": 1.5,
+#     "cv_cube_bound_compute_bound": 2.5,
+#     "cv_cube_bound_memory_bound": 2.0,
+#     "cv_vector_bound_compute_bound": 2.5,
+#     "cv_vector_bound_memory_bound": 2.0,
+#     "default": 2.0
+#   }
 ###############################################################################
 
 import argparse
 import csv
 import glob
+import json
 import os
 import re
 import subprocess
 import sys
-import tempfile
 from collections import defaultdict
+
+
+# ============================================================================
+# 默认阈值配置
+# ============================================================================
+DEFAULT_THRESHOLDS = {
+    "pure_vector_compute_bound":      2.0,
+    "pure_vector_memory_bound":       1.5,
+    "pure_cube_compute_bound":        2.0,
+    "pure_cube_memory_bound":         1.5,
+    "cv_cube_bound_compute_bound":    2.5,
+    "cv_cube_bound_memory_bound":     2.0,
+    "cv_vector_bound_compute_bound":  2.5,
+    "cv_vector_bound_memory_bound":   2.0,
+    "default":                        2.0,
+}
 
 
 # ============================================================================
@@ -83,14 +114,23 @@ def find_op_summary_csv(prof_dir: str) -> str:
     return files[-1]  # 取最新的
 
 
+def _clean_shape(raw: str) -> str:
+    """去除 CSV 额外引号, 将逗号分隔的维度还原为括号表示, 保留分号分隔的多个 shape."""
+    raw = raw.strip().strip('"')
+    # 每个 shape 以分号分隔, 维度以逗号分隔 → 转为 (d0,d1,...) 形式
+    parts = [p.strip() for p in raw.split(';') if p.strip()]
+    return ';'.join(f"({p})" for p in parts)
+
+
 def extract_kernel_perf(op_summary_csv: str, kernel_name: str) -> list[dict]:
     """
     从 op_summary CSV 中检索 kernel_name, 返回匹配行列表.
-    每个元素: {"op_name", "op_type", "task_type", "input_shapes", "duration_us"}
+    每个元素: {"op_name", "op_type", "task_type", "input_shapes",
+               "input_data_types", "output_shapes", "output_data_types", "duration_us"}
     """
     results = []
     with open(op_summary_csv, newline='', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
+        reader = csv.DictReader(f, quotechar='"')
         if not reader.fieldnames:
             return results
         if "Op Name" not in reader.fieldnames or "Task Duration(us)" not in reader.fieldnames:
@@ -101,23 +141,123 @@ def extract_kernel_perf(op_summary_csv: str, kernel_name: str) -> list[dict]:
             op_name = row.get("Op Name", "").strip()
             if kernel_name in op_name:
                 results.append({
-                    "op_name":      op_name,
-                    "op_type":      row.get("OP Type", "").strip(),
-                    "task_type":    row.get("Task Type", "").strip(),
-                    "input_shapes": row.get("Input Shapes", "").strip().strip('"'),
-                    "duration_us":  row.get("Task Duration(us)", "").strip(),
+                    "op_name":           op_name,
+                    "op_type":           row.get("OP Type", "").strip(),
+                    "task_type":         row.get("Task Type", "").strip(),
+                    "input_shapes":      _clean_shape(row.get("Input Shapes", "")),
+                    "input_data_types":  row.get("Input Data Types", "").strip().strip('"'),
+                    "output_shapes":     _clean_shape(row.get("Output Shapes", "")),
+                    "output_data_types": row.get("Output Data Types", "").strip().strip('"'),
+                    "duration_us":       row.get("Task Duration(us)", "").strip(),
                 })
     return results
 
 
 # ============================================================================
-# 3. 获取理论极限性能
+# 3. 获取理论极限性能 + 算子类型分类
 # ============================================================================
-def get_theoretical_perf(golden_path: str) -> float:
+def parse_theoretical_output(text: str) -> dict:
     """
-    运行理论极限性能脚本, 返回理论极限耗时 (us).
-    从打屏输出中解析 "Latency:      xxx us" 获取理论极限值.
+    从理论极限性能脚本的打屏输出中解析各项指标.
+    输出格式:
+        Latency:      xxx us
+        AIC time:     xxx us
+        AIV time:     xxx us
+        AIC CUBE:     xxx us
+        AIV VEC:      xxx us
     """
+    metrics = {}
+    patterns = {
+        "latency":  r'Latency:\s+([\d.]+)\s*us',
+        "aic_time": r'AIC time:\s+([\d.]+)\s*us',
+        "aiv_time": r'AIV time:\s+([\d.]+)\s*us',
+        "aic_cube": r'AIC CUBE:\s+([\d.]+)\s*us',
+        "aiv_vec":  r'AIV VEC:\s+([\d.]+)\s*us',
+    }
+    for key, pat in patterns.items():
+        m = re.search(pat, text)
+        metrics[key] = float(m.group(1)) if m else 0.0
+    return metrics
+
+
+def classify_operator(metrics: dict) -> tuple[str, str]:
+    """
+    根据理论建模指标判断算子类型和 bound 类型.
+
+    返回: (op_category, bound_detail)
+      op_category:
+        - "pure_vector"     : 纯 Vector (AIC time == 0, AIV time != 0)
+        - "pure_cube"       : 纯 Cube   (AIC time != 0, AIV time == 0)
+        - "cv_cube_bound"   : CV 融合, Cube Bound  (AIC time > AIV time)
+        - "cv_vector_bound" : CV 融合, Vector Bound (AIV time >= AIC time)
+        - "unknown"         : 无法判断
+      bound_detail:
+        - "compute_bound"   : 计算 Bound
+        - "memory_bound"    : 搬运 Bound
+        - "unknown"         : 无法判断
+    """
+    aic_time = metrics.get("aic_time", 0.0)
+    aiv_time = metrics.get("aiv_time", 0.0)
+    aic_cube = metrics.get("aic_cube", 0.0)
+    aiv_vec  = metrics.get("aiv_vec", 0.0)
+
+    if aic_time == 0 and aiv_time == 0:
+        return "unknown", "unknown"
+
+    if aic_time == 0 and aiv_time != 0:
+        op_category = "pure_vector"
+        bound_detail = "memory_bound" if aiv_time > aiv_vec else "compute_bound"
+    elif aic_time != 0 and aiv_time == 0:
+        op_category = "pure_cube"
+        bound_detail = "memory_bound" if aic_time > aic_cube else "compute_bound"
+    else:
+        # CV 融合
+        if aic_time > aiv_time:
+            op_category = "cv_cube_bound"
+        else:
+            op_category = "cv_vector_bound"
+        # bound 取决于主导核
+        if op_category == "cv_cube_bound":
+            bound_detail = "memory_bound" if aic_time > aic_cube else "compute_bound"
+        else:
+            bound_detail = "memory_bound" if aiv_time > aiv_vec else "compute_bound"
+
+    return op_category, bound_detail
+
+
+def get_threshold_key(op_category: str, bound_detail: str) -> str:
+    """将算子分类映射到阈值配置的 key."""
+    if op_category == "unknown" or bound_detail == "unknown":
+        return "default"
+    return f"{op_category}_{bound_detail}"
+
+
+def get_threshold(op_category: str, bound_detail: str,
+                  thresholds: dict) -> float:
+    """根据算子分类获取对应阈值."""
+    key = get_threshold_key(op_category, bound_detail)
+    return thresholds.get(key, thresholds.get("default", 2.0))
+
+
+def get_theoretical_perf(golden_path: str) -> dict:
+    """
+    运行理论极限性能脚本, 返回包含各项指标和算子分类的字典.
+    返回: {
+        "latency": float,    # 理论极限耗时 (us), -1.0 表示失败
+        "aic_time": float,
+        "aiv_time": float,
+        "aic_cube": float,
+        "aiv_vec": float,
+        "op_category": str,  # 算子类型
+        "bound_detail": str, # Bound 类型
+    }
+    """
+    fail_result = {
+        "latency": -1.0, "aic_time": 0, "aiv_time": 0,
+        "aic_cube": 0, "aiv_vec": 0,
+        "op_category": "unknown", "bound_detail": "unknown",
+    }
+
     cmd = (
         f'python -m examples.api.operator_api.pytorch_examples.main '
         f'--script {golden_path}'
@@ -132,17 +272,26 @@ def get_theoretical_perf(golden_path: str) -> float:
 
     if proc.returncode != 0:
         print(f"  [ERROR] 理论极限性能脚本执行失败 (退出码 {proc.returncode})")
-        return -1.0
+        return fail_result
 
-    # 解析 "Latency:      xxx us"
-    match = re.search(r'Latency:\s+([\d.]+)\s*us', combined)
-    if not match:
+    metrics = parse_theoretical_output(combined)
+
+    if metrics["latency"] <= 0:
         print("  [ERROR] 未能从输出中解析 Latency 值")
-        return -1.0
+        return fail_result
 
-    theoretical = float(match.group(1))
-    print(f"  [INFO] 理论极限性能: {theoretical} us")
-    return theoretical
+    op_category, bound_detail = classify_operator(metrics)
+
+    print(f"  [INFO] 理论极限性能: {metrics['latency']} us")
+    print(f"  [INFO] AIC time={metrics['aic_time']}  AIV time={metrics['aiv_time']}  "
+          f"AIC CUBE={metrics['aic_cube']}  AIV VEC={metrics['aiv_vec']}")
+    print(f"  [INFO] 算子类型: {op_category}, Bound: {bound_detail}")
+
+    return {
+        **metrics,
+        "op_category": op_category,
+        "bound_detail": bound_detail,
+    }
 
 
 # ============================================================================
@@ -187,12 +336,29 @@ def main():
     parser.add_argument("input_csv", help="输入 CSV 文件 (kernel_name, kernel_path, golden_path)")
     parser.add_argument("-o", "--output", default="benchmark_result.csv",
                         help="输出全量对比 CSV (默认: benchmark_result.csv)")
-    parser.add_argument("--threshold", type=float, default=2.0,
-                        help="ratio 阈值 (默认: 2.0), "
-                             ">= 阈值输出到 *_above 表, < 阈值输出到 *_below 表")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="全局 ratio 阈值 (覆盖所有类型的默认阈值)")
+    parser.add_argument("--threshold-config", default=None,
+                        help="阈值配置 JSON 文件路径, 按算子类型配置不同阈值")
     parser.add_argument("--result-dir", default="./result",
                         help="msprof 输出目录 (默认: ./result)")
     args = parser.parse_args()
+
+    # ---- 加载阈值配置 ----
+    thresholds = dict(DEFAULT_THRESHOLDS)
+    if args.threshold_config:
+        if not os.path.isfile(args.threshold_config):
+            print(f"[ERROR] 阈值配置文件不存在: {args.threshold_config}")
+            sys.exit(1)
+        with open(args.threshold_config, encoding='utf-8') as f:
+            user_thresholds = json.load(f)
+        thresholds.update(user_thresholds)
+        print(f"[INFO] 已加载阈值配置: {args.threshold_config}")
+
+    if args.threshold is not None:
+        for key in thresholds:
+            thresholds[key] = args.threshold
+        print(f"[INFO] 全局阈值覆盖: 所有类型统一使用 {args.threshold}")
 
     if not os.path.isfile(args.input_csv):
         print(f"[ERROR] 输入文件不存在: {args.input_csv}")
@@ -211,7 +377,9 @@ def main():
     print(f" 算子数量  : {len(tasks)}")
     print(f" 输出文件  : {args.output}")
     print(f" msprof 目录: {args.result_dir}")
-    print(f" ratio 阈值 : {args.threshold}")
+    print(f" 阈值配置  :")
+    for k, v in thresholds.items():
+        print(f"   {k:40s} = {v}")
     print("=" * 64)
 
     # ---- 4.2 按 kernel_path 分组, 避免重复执行 msprof ----
@@ -259,8 +427,15 @@ def main():
                 "kernel_path":           kernel_path,
                 "golden_path":           golden_path,
                 "input_shapes":          "",
+                "input_data_types":      "N/A",
+                "output_shapes":         "N/A",
+                "output_data_types":     "N/A",
                 "actual_duration_us":    "N/A",
                 "theoretical_duration_us": "N/A",
+                "op_category":           "N/A",
+                "bound_detail":          "N/A",
+                "threshold_key":         "N/A",
+                "threshold":             "N/A",
                 "ratio":                 "N/A",
             })
             continue
@@ -275,15 +450,29 @@ def main():
                 "kernel_path":           kernel_path,
                 "golden_path":           golden_path,
                 "input_shapes":          "",
+                "input_data_types":      "N/A",
+                "output_shapes":         "N/A",
+                "output_data_types":     "N/A",
                 "actual_duration_us":    "NOT_FOUND",
                 "theoretical_duration_us": "N/A",
+                "op_category":           "N/A",
+                "bound_detail":          "N/A",
+                "threshold_key":         "N/A",
+                "threshold":             "N/A",
                 "ratio":                 "N/A",
             })
             continue
 
-        # 获取理论极限性能
+        # 获取理论极限性能 + 算子分类
         print(f"\n[INFO] {kernel_name}: 获取理论极限性能 (golden: {golden_path})")
-        theoretical = get_theoretical_perf(golden_path)
+        theo_result = get_theoretical_perf(golden_path)
+        theoretical   = theo_result["latency"]
+        op_category   = theo_result["op_category"]
+        bound_detail  = theo_result["bound_detail"]
+        thresh_key    = get_threshold_key(op_category, bound_detail)
+        thresh_val    = get_threshold(op_category, bound_detail, thresholds)
+
+        print(f"  [INFO] 适用阈值: {thresh_key} = {thresh_val}")
 
         for rec in perf_records:
             try:
@@ -301,30 +490,40 @@ def main():
                 "kernel_path":             kernel_path,
                 "golden_path":             golden_path,
                 "input_shapes":            rec["input_shapes"],
+                "input_data_types":        rec["input_data_types"],
+                "output_shapes":           rec["output_shapes"],
+                "output_data_types":       rec["output_data_types"],
                 "actual_duration_us":      rec["duration_us"],
                 "theoretical_duration_us": theoretical,
+                "op_category":             op_category,
+                "bound_detail":            bound_detail,
+                "threshold_key":           thresh_key,
+                "threshold":               thresh_val,
                 "ratio":                   ratio,
             })
 
+            status = "✗ 未达标" if isinstance(ratio, float) and ratio >= thresh_val else "✓ 达标"
+            if not isinstance(ratio, float):
+                status = "? N/A"
             print(f"  Shape={rec['input_shapes']:30s}  "
                   f"实测={rec['duration_us']:>10s} us  "
                   f"理论={theoretical:>10.3f} us  "
-                  f"比值={ratio}")
+                  f"比值={ratio}  "
+                  f"阈值={thresh_val}  {status}")
 
-    # ---- 4.4 按阈值分拣 ----
-    threshold = args.threshold
+    # ---- 4.4 按各行自身阈值分拣 ----
     rows_above = []  # ratio >= 阈值 (未达标)
     rows_below = []  # ratio <  阈值 (达标)
 
     for row in output_rows:
         r = row["ratio"]
-        if isinstance(r, (int, float)):
-            if r >= threshold:
+        row_thresh = row["threshold"]
+        if isinstance(r, (int, float)) and isinstance(row_thresh, (int, float)):
+            if r >= row_thresh:
                 rows_above.append(row)
             else:
                 rows_below.append(row)
         else:
-            # ratio 为 N/A 等非数值, 归入未达标表
             rows_above.append(row)
 
     # ---- 4.5 写出三个 CSV ----
@@ -333,8 +532,15 @@ def main():
         "kernel_path",
         "golden_path",
         "input_shapes",
+        "input_data_types",
+        "output_shapes",
+        "output_data_types",
         "actual_duration_us",
         "theoretical_duration_us",
+        "op_category",
+        "bound_detail",
+        "threshold_key",
+        "threshold",
         "ratio",
     ]
 
@@ -354,11 +560,11 @@ def main():
     write_csv(out_below, rows_below)
 
     print(f"\n{'=' * 64}")
-    print(f" 完成! 阈值 = {threshold}")
+    print(f" 完成! (按算子类型自动选择阈值)")
     print(f"{'─' * 64}")
-    print(f" 全量报告     : {os.path.abspath(out_all):50s} ({len(output_rows)} 条)")
-    print(f" 未达标 (>={threshold}) : {os.path.abspath(out_above):50s} ({len(rows_above)} 条)")
-    print(f" 已达标 (<{threshold})  : {os.path.abspath(out_below):50s} ({len(rows_below)} 条)")
+    print(f" 全量报告  : {os.path.abspath(out_all):50s} ({len(output_rows)} 条)")
+    print(f" 未达标     : {os.path.abspath(out_above):50s} ({len(rows_above)} 条)")
+    print(f" 已达标     : {os.path.abspath(out_below):50s} ({len(rows_below)} 条)")
     print(f"{'=' * 64}")
 
 
