@@ -567,7 +567,7 @@ def main():
 
     def write_csv(path, rows):
         with open(path, "w", newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=';')
+            writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
             writer.writeheader()
             writer.writerows(rows)
 
