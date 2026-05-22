@@ -115,11 +115,11 @@ def find_op_summary_csv(prof_dir: str) -> str:
 
 
 def _clean_shape(raw: str) -> str:
-    """去除 CSV 额外引号, 将逗号分隔的维度还原为括号表示, 保留分号分隔的多个 shape."""
+    """去除 CSV 额外引号, 将逗号分隔的维度用 x 连接, 保留分号分隔的多个 shape."""
     raw = raw.strip().strip('"')
-    # 每个 shape 以分号分隔, 维度以逗号分隔 → 转为 (d0,d1,...) 形式
+    # 每个 shape 以分号分隔, 维度以逗号分隔 → 转为 d0xd1x... 形式
     parts = [p.strip() for p in raw.split(';') if p.strip()]
-    return ';'.join(f"({p})" for p in parts)
+    return ';'.join(p.replace(',', 'x') for p in parts)
 
 
 def extract_kernel_perf(op_summary_csv: str, kernel_name: str) -> list[dict]:
