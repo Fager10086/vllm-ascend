@@ -432,6 +432,10 @@ def main():
                 "output_data_types":     "N/A",
                 "actual_duration_us":    "N/A",
                 "theoretical_duration_us": "N/A",
+                "aic_time_us":           "N/A",
+                "aiv_time_us":           "N/A",
+                "aic_cube_us":           "N/A",
+                "aiv_vec_us":            "N/A",
                 "op_category":           "N/A",
                 "bound_detail":          "N/A",
                 "threshold_key":         "N/A",
@@ -455,6 +459,10 @@ def main():
                 "output_data_types":     "N/A",
                 "actual_duration_us":    "NOT_FOUND",
                 "theoretical_duration_us": "N/A",
+                "aic_time_us":           "N/A",
+                "aiv_time_us":           "N/A",
+                "aic_cube_us":           "N/A",
+                "aiv_vec_us":            "N/A",
                 "op_category":           "N/A",
                 "bound_detail":          "N/A",
                 "threshold_key":         "N/A",
@@ -495,6 +503,10 @@ def main():
                 "output_data_types":       rec["output_data_types"],
                 "actual_duration_us":      rec["duration_us"],
                 "theoretical_duration_us": theoretical,
+                "aic_time_us":             theo_result["aic_time"],
+                "aiv_time_us":             theo_result["aiv_time"],
+                "aic_cube_us":             theo_result["aic_cube"],
+                "aiv_vec_us":              theo_result["aiv_vec"],
                 "op_category":             op_category,
                 "bound_detail":            bound_detail,
                 "threshold_key":           thresh_key,
@@ -537,6 +549,10 @@ def main():
         "output_data_types",
         "actual_duration_us",
         "theoretical_duration_us",
+        "aic_time_us",
+        "aiv_time_us",
+        "aic_cube_us",
+        "aiv_vec_us",
         "op_category",
         "bound_detail",
         "threshold_key",
@@ -551,7 +567,7 @@ def main():
 
     def write_csv(path, rows):
         with open(path, "w", newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
             writer.writeheader()
             writer.writerows(rows)
 
