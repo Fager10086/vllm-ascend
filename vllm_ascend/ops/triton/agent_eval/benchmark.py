@@ -139,7 +139,7 @@ def extract_kernel_perf(op_summary_csv: str, kernel_name: str) -> list[dict]:
 
         for row in reader:
             op_name = row.get("Op Name", "").strip()
-            if kernel_name in op_name:
+            if kernel_name.lower() in op_name.lower():
                 results.append({
                     "op_name":           op_name,
                     "op_type":           row.get("OP Type", "").strip(),
