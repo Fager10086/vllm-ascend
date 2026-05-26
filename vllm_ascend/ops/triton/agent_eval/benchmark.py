@@ -156,28 +156,155 @@ def extract_kernel_perf(op_summary_csv: str, kernel_name: str) -> list[dict]:
 # ============================================================================
 # 3. 获取理论极限性能 + 算子类型分类
 # ============================================================================
-def parse_theoretical_output(text: str) -> dict:
+def _normalize_dtype(dtype: str) -> str:
+    """统一 dtype 表示: bf16/BF16→BF16, float/FLOAT/float32/FLOAT32→FLOAT, etc."""
+    d = dtype.strip().upper()
+    alias = {
+        "FP16": "FLOAT16", "FP32": "FLOAT32", "FP64": "FLOAT64",
+        "BF16": "BFLOAT16",
+        "FLOAT": "FLOAT32", "DOUBLE": "FLOAT64",
+        "HALF": "FLOAT16",
+        "INT": "INT32", "LONG": "INT64",
+        "BOOL": "BOOL",
+    }
+    return alias.get(d, d)
+
+
+def _make_match_key(shapes: list[str], dtypes: list[str]) -> str:
     """
-    从理论极限性能脚本的打屏输出中解析各项指标.
-    输出格式:
+    根据 shape + dtype 列表生成匹配 key.
+    shape 格式: "1x7168" 等 (维度用 x 连接)
+    dtype 格式: 统一大写
+    返回: "1x7168_BFLOAT16|256_BFLOAT16|..."
+    """
+    pairs = []
+    for i in range(max(len(shapes), len(dtypes))):
+        s = shapes[i].strip() if i < len(shapes) else ""
+        d = _normalize_dtype(dtypes[i]) if i < len(dtypes) else ""
+        pairs.append(f"{s}_{d}")
+    return "|".join(pairs)
+
+
+def make_match_key_from_actual(rec: dict) -> str:
+    """从实测记录 (op_summary) 生成匹配 key."""
+    shapes = [s.strip() for s in rec["input_shapes"].split(';') if s.strip()]
+    dtypes = [d.strip() for d in rec["input_data_types"].split(';') if d.strip()]
+    return _make_match_key(shapes, dtypes)
+
+
+def parse_theoretical_cases(text: str) -> list[dict]:
+    """
+    从理论极限性能脚本的打屏输出中解析多个测试用例.
+
+    每个用例的输出格式:
+        input[0]: (1, 7168) bf16
+        input[1]: (256,) bf16
+        ...
         Latency:      xxx us
         AIC time:     xxx us
         AIV time:     xxx us
         AIC CUBE:     xxx us
         AIV VEC:      xxx us
+
+    返回: [{
+        "match_key": str,        # 用于和实测数据匹配的 key
+        "input_shapes": str,     # "1x7168;256" 格式
+        "input_data_types": str, # "BF16;BF16" 格式
+        "latency": float,
+        "aic_time": float, "aiv_time": float,
+        "aic_cube": float, "aiv_vec": float,
+        "op_category": str, "bound_detail": str,
+    }, ...]
     """
-    metrics = {}
-    patterns = {
-        "latency":  r'Latency:\s+([\d.]+)\s*us',
-        "aic_time": r'AIC time:\s+([\d.]+)\s*us',
-        "aiv_time": r'AIV time:\s+([\d.]+)\s*us',
-        "aic_cube": r'AIC CUBE:\s+([\d.]+)\s*us',
-        "aiv_vec":  r'AIV VEC:\s+([\d.]+)\s*us',
+    cases = []
+    lines = text.splitlines()
+
+    # 收集当前 case 的 input 信息
+    cur_inputs_shapes = []   # ["1x7168", "256", ...]
+    cur_inputs_dtypes = []   # ["bf16", "bf16", ...]
+    cur_metrics_lines = []   # 收集指标行
+
+    input_pat = re.compile(r'input\[\d+\]:\s*\(([^)]*)\)\s*(\S+)')
+    metric_patterns = {
+        "latency":  re.compile(r'Latency:\s+([\d.]+)\s*us'),
+        "aic_time": re.compile(r'AIC time:\s+([\d.]+)\s*us'),
+        "aiv_time": re.compile(r'AIV time:\s+([\d.]+)\s*us'),
+        "aic_cube": re.compile(r'AIC CUBE:\s+([\d.]+)\s*us'),
+        "aiv_vec":  re.compile(r'AIV VEC:\s+([\d.]+)\s*us'),
     }
-    for key, pat in patterns.items():
-        m = re.search(pat, text)
-        metrics[key] = float(m.group(1)) if m else 0.0
-    return metrics
+
+    def flush_case():
+        """将当前收集的 input + metrics 组装成一个 case."""
+        if not cur_inputs_shapes:
+            return
+        # 解析指标
+        block = '\n'.join(cur_metrics_lines)
+        metrics = {}
+        for key, pat in metric_patterns.items():
+            m = pat.search(block)
+            metrics[key] = float(m.group(1)) if m else 0.0
+
+        if metrics.get("latency", 0) <= 0:
+            return
+
+        op_category, bound_detail = classify_operator(metrics)
+
+        # 构建 shape 和 dtype 字符串 (用于输出 CSV)
+        shapes_normalized = []
+        for s in cur_inputs_shapes:
+            dims = [d.strip() for d in s.split(',') if d.strip()]
+            shapes_normalized.append('x'.join(dims))
+
+        dtypes_normalized = [_normalize_dtype(d) for d in cur_inputs_dtypes]
+
+        match_key = _make_match_key(shapes_normalized, dtypes_normalized)
+
+        cases.append({
+            "match_key":        match_key,
+            "input_shapes":     ';'.join(shapes_normalized),
+            "input_data_types": ';'.join(dtypes_normalized),
+            **metrics,
+            "op_category":      op_category,
+            "bound_detail":     bound_detail,
+        })
+
+    for line in lines:
+        line_stripped = line.strip()
+
+        # 匹配 input 行
+        m_input = input_pat.search(line_stripped)
+        if m_input:
+            # 如果遇到 input[0] 且已有积累, 说明进入新 case
+            idx_match = re.search(r'input\[(\d+)\]', line_stripped)
+            if idx_match and int(idx_match.group(1)) == 0 and cur_inputs_shapes:
+                flush_case()
+                cur_inputs_shapes = []
+                cur_inputs_dtypes = []
+                cur_metrics_lines = []
+            cur_inputs_shapes.append(m_input.group(1))
+            cur_inputs_dtypes.append(m_input.group(2))
+            continue
+
+        # 匹配指标行
+        is_metric = False
+        for pat in metric_patterns.values():
+            if pat.search(line_stripped):
+                is_metric = True
+                break
+        if is_metric:
+            cur_metrics_lines.append(line_stripped)
+            # AIV VEC 是最后一个指标, 遇到后 flush
+            if metric_patterns["aiv_vec"].search(line_stripped):
+                flush_case()
+                cur_inputs_shapes = []
+                cur_inputs_dtypes = []
+                cur_metrics_lines = []
+
+    # 处理尾部残留
+    if cur_inputs_shapes and cur_metrics_lines:
+        flush_case()
+
+    return cases
 
 
 def classify_operator(metrics: dict) -> tuple[str, str]:
@@ -239,25 +366,14 @@ def get_threshold(op_category: str, bound_detail: str,
     return thresholds.get(key, thresholds.get("default", 2.0))
 
 
-def get_theoretical_perf(golden_path: str) -> dict:
+def get_theoretical_perf(golden_path: str) -> list[dict]:
     """
-    运行理论极限性能脚本, 返回包含各项指标和算子分类的字典.
-    返回: {
-        "latency": float,    # 理论极限耗时 (us), -1.0 表示失败
-        "aic_time": float,
-        "aiv_time": float,
-        "aic_cube": float,
-        "aiv_vec": float,
-        "op_category": str,  # 算子类型
-        "bound_detail": str, # Bound 类型
-    }
+    运行理论极限性能脚本, 返回多个测试用例的理论性能列表.
+    每个元素包含: match_key, input_shapes, input_data_types,
+                  latency, aic_time, aiv_time, aic_cube, aiv_vec,
+                  op_category, bound_detail.
+    失败时返回空列表.
     """
-    fail_result = {
-        "latency": -1.0, "aic_time": 0, "aiv_time": 0,
-        "aic_cube": 0, "aiv_vec": 0,
-        "op_category": "unknown", "bound_detail": "unknown",
-    }
-
     cmd = (
         f'python -m examples.api.operator_api.pytorch_examples.main '
         f'--script {golden_path}'
@@ -272,26 +388,21 @@ def get_theoretical_perf(golden_path: str) -> dict:
 
     if proc.returncode != 0:
         print(f"  [ERROR] 理论极限性能脚本执行失败 (退出码 {proc.returncode})")
-        return fail_result
+        return []
 
-    metrics = parse_theoretical_output(combined)
+    cases = parse_theoretical_cases(combined)
 
-    if metrics["latency"] <= 0:
-        print("  [ERROR] 未能从输出中解析 Latency 值")
-        return fail_result
+    if not cases:
+        print("  [ERROR] 未能从输出中解析任何测试用例")
+        return []
 
-    op_category, bound_detail = classify_operator(metrics)
+    for c in cases:
+        print(f"  [INFO] 理论用例: shapes={c['input_shapes']}  dtypes={c['input_data_types']}  "
+              f"Latency={c['latency']}us  "
+              f"AIC={c['aic_time']}  AIV={c['aiv_time']}  "
+              f"类型={c['op_category']}/{c['bound_detail']}")
 
-    print(f"  [INFO] 理论极限性能: {metrics['latency']} us")
-    print(f"  [INFO] AIC time={metrics['aic_time']}  AIV time={metrics['aiv_time']}  "
-          f"AIC CUBE={metrics['aic_cube']}  AIV VEC={metrics['aiv_vec']}")
-    print(f"  [INFO] 算子类型: {op_category}, Bound: {bound_detail}")
-
-    return {
-        **metrics,
-        "op_category": op_category,
-        "bound_detail": bound_detail,
-    }
+    return cases
 
 
 # ============================================================================
@@ -471,21 +582,52 @@ def main():
             })
             continue
 
-        # 获取理论极限性能 + 算子分类
+        # 获取理论极限性能 (多个用例)
         print(f"\n[INFO] {kernel_name}: 获取理论极限性能 (golden: {golden_path})")
-        theo_result = get_theoretical_perf(golden_path)
-        theoretical   = theo_result["latency"]
-        op_category   = theo_result["op_category"]
-        bound_detail  = theo_result["bound_detail"]
-        thresh_key    = get_threshold_key(op_category, bound_detail)
-        thresh_val    = get_threshold(op_category, bound_detail, thresholds)
+        theo_cases = get_theoretical_perf(golden_path)
 
-        print(f"  [INFO] 适用阈值: {thresh_key} = {thresh_val}")
+        # 建立 match_key → theo_case 的索引
+        theo_map: dict[str, dict] = {}
+        for tc in theo_cases:
+            theo_map[tc["match_key"]] = tc
+
+        if theo_cases:
+            print(f"  [INFO] 理论用例数: {len(theo_cases)}")
+        else:
+            print(f"  [WARN] 未获取到理论极限数据")
 
         for rec in perf_records:
+            # 构造实测记录的 match key
+            actual_key = make_match_key_from_actual(rec)
+
+            # 查找匹配的理论用例
+            matched = theo_map.get(actual_key)
+
+            if matched:
+                theoretical   = matched["latency"]
+                op_category   = matched["op_category"]
+                bound_detail  = matched["bound_detail"]
+                aic_time_val  = matched["aic_time"]
+                aiv_time_val  = matched["aiv_time"]
+                aic_cube_val  = matched["aic_cube"]
+                aiv_vec_val   = matched["aiv_vec"]
+                thresh_key    = get_threshold_key(op_category, bound_detail)
+                thresh_val    = get_threshold(op_category, bound_detail, thresholds)
+            else:
+                theoretical   = -1.0
+                op_category   = "N/A"
+                bound_detail  = "N/A"
+                aic_time_val  = "N/A"
+                aiv_time_val  = "N/A"
+                aic_cube_val  = "N/A"
+                aiv_vec_val   = "N/A"
+                thresh_key    = "N/A"
+                thresh_val    = "N/A"
+                print(f"  [WARN] 实测记录未匹配到理论用例: key={actual_key}")
+
             try:
                 actual = float(rec["duration_us"])
-                if theoretical > 0:
+                if isinstance(theoretical, (int, float)) and theoretical > 0:
                     ratio = round(actual / theoretical, 4)
                 else:
                     ratio = "N/A"
@@ -502,11 +644,11 @@ def main():
                 "output_shapes":           rec["output_shapes"],
                 "output_data_types":       rec["output_data_types"],
                 "actual_duration_us":      rec["duration_us"],
-                "theoretical_duration_us": theoretical,
-                "aic_time_us":             theo_result["aic_time"],
-                "aiv_time_us":             theo_result["aiv_time"],
-                "aic_cube_us":             theo_result["aic_cube"],
-                "aiv_vec_us":              theo_result["aiv_vec"],
+                "theoretical_duration_us": theoretical if theoretical > 0 else "N/A",
+                "aic_time_us":             aic_time_val,
+                "aiv_time_us":             aiv_time_val,
+                "aic_cube_us":             aic_cube_val,
+                "aiv_vec_us":              aiv_vec_val,
                 "op_category":             op_category,
                 "bound_detail":            bound_detail,
                 "threshold_key":           thresh_key,
@@ -514,12 +656,14 @@ def main():
                 "ratio":                   ratio,
             })
 
-            status = "✗ 未达标" if isinstance(ratio, float) and ratio >= thresh_val else "✓ 达标"
+            status = "✗ 未达标" if isinstance(ratio, float) and isinstance(thresh_val, (int, float)) and ratio >= thresh_val else "✓ 达标"
             if not isinstance(ratio, float):
                 status = "? N/A"
-            print(f"  Shape={rec['input_shapes']:30s}  "
+            theo_str = f"{theoretical:>10.3f}" if isinstance(theoretical, (int, float)) and theoretical > 0 else "       N/A"
+            matched_str = "匹配" if matched else "未匹配"
+            print(f"  [{matched_str}] Shape={rec['input_shapes']:30s}  "
                   f"实测={rec['duration_us']:>10s} us  "
-                  f"理论={theoretical:>10.3f} us  "
+                  f"理论={theo_str} us  "
                   f"比值={ratio}  "
                   f"阈值={thresh_val}  {status}")
 
