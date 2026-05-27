@@ -452,6 +452,7 @@ class ShapeProfiler:
             ("torch_npu.npu_apply_rotary_pos_emb", "npu_apply_rotary_pos_emb"),
             ("torch_npu.npu_quantize", "npu_quantize"),
             ("torch_npu.npu_dynamic_quant", "npu_dynamic_quant"),
+            ("torch_npu.npu_dynamic_mx_quant", "npu_dynamic_mx_quant"),
             ("torch_npu.npu_add_rms_norm_quant", "npu_add_rms_norm_quant"),
             ("torch_npu.npu_add_rms_norm_dynamic_quant", "npu_add_rms_norm_dynamic_quant"),
             ("torch_npu.npu_add_rms_norm", "npu_add_rms_norm"),
