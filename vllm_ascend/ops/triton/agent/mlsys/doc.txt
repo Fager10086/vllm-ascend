@@ -1,0 +1,11 @@
+优化参考：
+基础软件的优化kernels：https://gitcode.com/Ascend/triton-ascend-kernels
+之前构建的模板库：https://github.com/Fager10086/Ascend_ref_ops
+triton-ascend：https://triton-ascend-test.readthedocs.io/zh-cn/latest/
+
+
+性能评估skills：
+https://gitcode.com/Ascend/agent-skills/blob/master/skills/triton-operator-performance-eval/SKILL.md
+精度评估skills:
+https://gitcode.com/Ascend/agent-skills/blob/master/skills/triton-operator-precision-eval/SKILL.md
+精度验证通过后，再谈性能提升
