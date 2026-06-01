@@ -370,8 +370,8 @@ class ShapeProfiler:
                 print(f"[ShapeProfiler] DEBUG: 跳过已包装的 {op_name}", flush=True)
                 return
             
-            wrapped = self._wrap_function(original_func, op_name)
-            
+            wrapped = self._wrap_triton_function(original_func, op_name)
+
             setattr(module, attr_name, wrapped)
             self.original_funcs[op_name] = (module, original_func)
             print(f"[ShapeProfiler] DEBUG: 成功安装 module hook: {module_path}.{attr_name} -> {op_name}", flush=True)
@@ -490,12 +490,15 @@ class ShapeProfiler:
             # ("vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope", "split_qkv_rmsnorm_rope_impl", "split_qkv_rmsnorm_rope_impl"),
             ("vllm_ascend.ops.triton.fla.chunk", "chunk_gated_delta_rule", "chunk_gated_delta_rule"),
             ("vllm.model_executor.layers.fla.ops.chunk", "chunk_scaled_dot_kkt_fwd", "chunk_scaled_dot_kkt_fwd"),
+            ("vllm_ascend.ops.triton.fla.chunk", "chunk_scaled_dot_kkt_fwd", "chunk_scaled_dot_kkt_fwd"),
             ("vllm_ascend.ops.triton.fla.cumsum", "chunk_local_cumsum_scalar", "chunk_local_cumsum_scalar"),
             ("vllm.model_executor.layers.fla.ops", "fused_recurrent_gated_delta_rule", "fused_recurrent_gated_delta_rule"),
             ("vllm_ascend.ops.triton.muls_add", "muls_add_triton", "muls_add"),
             ("vllm.model_executor.layers.layernorm", "fused_add_rms_norm", "fused_add_rms_norm"),
             ("vllm_ascend.ops.triton.fla.solve_tril", "solve_tril", "solve_tril"),
+            ("vllm_ascend.ops.triton.fla.chunk", "solve_tril", "solve_tril"),
             ("vllm_ascend.ops.triton.fla.wy_fast", "recompute_w_u_fwd", "recompute_w_u_fwd"),
+            ("vllm_ascend.ops.triton.fla.chunk", "recompute_w_u_fwd", "recompute_w_u_fwd"),
             ("vllm_ascend.ops.triton.fla.chunk_o", "chunk_fwd_o", "chunk_fwd_o"),
             ("vllm_ascend.ops.triton.layernorm_gated", "layer_norm_fwd_npu", "layer_norm_fwd_npu"),
             ("vllm_ascend.ops.triton.fused_gdn_gating", "fused_gdn_gating_patch", "fused_gdn_gating_patch"),
@@ -566,9 +569,30 @@ class ShapeProfiler:
         
         for op_path, op_name in torch_ops:
             self._install_torch_op_hook(op_path, op_name)
-        
+
+        self._patch_cross_module_refs()
+
         print(f"[ShapeProfiler] Worker 进程已安装 {len(self.original_funcs)} 个 hooks"
               f" (pid={self._pid}, dp_rank={self._dp_rank}, dp_size={self._dp_size})", flush=True)
+
+    def _patch_cross_module_refs(self):
+        for op_name, (parent_module, original_func) in list(self.original_funcs.items()):
+            if not callable(original_func):
+                continue
+            wrapped_func = getattr(parent_module, original_func.__name__, None)
+            if wrapped_func is None or not getattr(wrapped_func, "_shape_profiler_wrapped", False):
+                continue
+            for mod_name, mod in list(sys.modules.items()):
+                if mod is None or mod is parent_module:
+                    continue
+                try:
+                    mod_dict = vars(mod)
+                except TypeError:
+                    continue
+                for attr_key, attr_val in list(mod_dict.items()):
+                    if attr_val is original_func:
+                        setattr(mod, attr_key, wrapped_func)
+                        print(f"[ShapeProfiler] DEBUG: 修补跨模块引用: {mod_name}.{attr_key} -> {op_name}", flush=True)
     
     def uninstall_hooks(self):
         for op_name, (parent, original_func) in self.original_funcs.items():
