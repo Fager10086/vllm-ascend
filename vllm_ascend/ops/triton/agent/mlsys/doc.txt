@@ -7,5 +7,8 @@ triton-ascend：https://triton-ascend-test.readthedocs.io/zh-cn/latest/
 性能评估skills：
 https://gitcode.com/Ascend/agent-skills/blob/master/skills/triton-operator-performance-eval/SKILL.md
 精度评估skills:
-https://gitcode.com/Ascend/agent-skills/blob/master/skills/triton-operator-precision-eval/SKILL.md
-精度验证通过后，再谈性能提升
+https://gitcode.谈com/Ascend/agent-skills/blob/master/skills/triton-operator-precision-eval/SKILL.md
+精度验证通过后，再性能提升
+
+
+优化算子：https://github.com/Fager10086/vllm-ascend/blob/ops_agent/vllm_ascend/ops/triton/agent/recompute_w_u_fwd/target
