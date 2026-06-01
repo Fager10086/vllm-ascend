@@ -1,0 +1,1 @@
+ python shape_profiler.py --serve     --model /home/weights/Qwen3.5-0.8B     --output-dir ./sp_test     --max-model-len 1024     --max-num-seqs 4     --gpu-memory-utilization 0.5
