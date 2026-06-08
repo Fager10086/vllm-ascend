@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Tuple
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 
 def _detect_dp_info():
@@ -191,6 +192,31 @@ class _TritonLaunchedKernelWrapper:
         return f"_TritonLaunchedKernelWrapper({self._original})"
 
 
+class _ShapeDispatchMode(TorchDispatchMode):
+    """在图模式 graph replay 阶段捕获所有 dispatch op 的 shape/dtype。"""
+
+    def __init__(self, profiler: "ShapeProfiler"):
+        super().__init__()
+        self._profiler = profiler
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        result = func(*args, **(kwargs or {}))
+        if not torch.compiler.is_compiling() and self._profiler.enabled:
+            op_name = str(func)
+            arg_shapes = []
+            for i, a in enumerate(args):
+                if isinstance(a, torch.Tensor):
+                    arg_shapes.append({"arg_idx": i, "shape": [int(d) for d in a.shape], "dtype": str(a.dtype)})
+            out_shapes = []
+            for item in (result if isinstance(result, (list, tuple)) else [result]):
+                if isinstance(item, torch.Tensor):
+                    out_shapes.append({"shape": [int(d) for d in item.shape], "dtype": str(item.dtype)})
+            if arg_shapes:
+                self._profiler._save_record_directly(op_name, args, kwargs or {}, result)
+                self._profiler.record_call(op_name, args, kwargs or {}, result)
+        return result
+
+
 class ShapeProfiler:
     _instance = None
 
@@ -211,6 +237,7 @@ class ShapeProfiler:
         self._pid = os.getpid()
         self._dp_rank, self._dp_size = _detect_dp_info()
         self._is_dp_mode = self._dp_rank >= 0 and self._dp_size > 1
+        self._dispatch_mode: "_ShapeDispatchMode | None" = None
         atexit.register(self._cleanup)
     
     def _get_shape_dtype(self, obj: Any) -> List[Tuple[List[int], str]]:
@@ -585,6 +612,11 @@ class ShapeProfiler:
 
             self._patch_cross_module_refs()
 
+        else:
+            self._dispatch_mode = _ShapeDispatchMode(self)
+            self._dispatch_mode.__enter__()
+            print("[ShapeProfiler] DEBUG: 图模式已启用 TorchDispatchMode 捕获 torch ops", flush=True)
+
         print(f"[ShapeProfiler] Worker 进程已安装 {len(self.original_funcs)} 个 hooks"
               f" (pid={self._pid}, dp_rank={self._dp_rank}, dp_size={self._dp_size})", flush=True)
 
@@ -608,6 +640,12 @@ class ShapeProfiler:
                         print(f"[ShapeProfiler] DEBUG: 修补跨模块引用: {mod_name}.{attr_key} -> {op_name}", flush=True)
     
     def uninstall_hooks(self):
+        if self._dispatch_mode is not None:
+            try:
+                self._dispatch_mode.__exit__(None, None, None)
+            except Exception:
+                pass
+            self._dispatch_mode = None
         for op_name, (parent, original_func) in self.original_funcs.items():
             if hasattr(original_func, "__name__"):
                 setattr(parent, original_func.__name__, original_func)
