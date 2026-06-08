@@ -1050,13 +1050,15 @@ if __name__ == "__main__":
                 "--host", args.host,
                 "--port", str(args.port),
                 "--trust-remote-code",
-                "--enforce-eager",
+                "--compilation-config", '{"cudagraph_mode":"FULL_DECODE_ONLY"}',
                 "--gpu-memory-utilization", str(args.gpu_memory_utilization),
                 "--max-num-seqs", str(args.max_num_seqs),
                 "--tensor-parallel-size", str(args.tensor_parallel_size),
             ]
             if args.max_model_len:
                 serve_cmd.extend(["--max-model-len", str(args.max_model_len)])
+                
+                                # "--enforce-eager",
 
             print(f"[ShapeProfiler] 启动 vLLM serve 模式", flush=True)
             print(f"[ShapeProfiler] 模型: {args.model}", flush=True)
@@ -1066,6 +1068,10 @@ if __name__ == "__main__":
             print(f"[ShapeProfiler] 按 Ctrl+C 停止服务并生成报告", flush=True)
 
             process = None
+            def _sigterm_handler(signum, frame):
+                raise KeyboardInterrupt
+            import signal as _signal
+            _signal.signal(_signal.SIGTERM, _sigterm_handler)
             try:
                 process = subprocess.Popen(serve_cmd)
                 process.wait()
@@ -1083,6 +1089,9 @@ if __name__ == "__main__":
                 import traceback
                 traceback.print_exc()
             finally:
+                # 等待 worker 子进程写完 .jsonl 文件
+                import time as _time
+                _time.sleep(3)
                 _profiler.end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 _profiler.generate_reports(args.output_dir, merge_pids=True)
                 if "SHAPE_PROFILER_OUTPUT_DIR" in os.environ:
