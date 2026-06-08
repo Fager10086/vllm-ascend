@@ -116,15 +116,16 @@ class OpOverloadPacketWrapper:
     
     def __call__(self, *args, **kwargs):
         result = self._original(*args, **kwargs)
-        self._profiler.record_call(self._op_name, args, kwargs, result)
+        if not torch.compiler.is_compiling():
+            self._profiler.record_call(self._op_name, args, kwargs, result)
         return result
-    
+
     def __getattr__(self, name):
         return getattr(self._original, name)
-    
+
     def __getitem__(self, key):
         return self._original[key]
-    
+
     def __repr__(self):
         return f"OpOverloadPacketWrapper({self._original})"
     
@@ -146,16 +147,17 @@ class TritonKernelWrapper:
     
     def __call__(self, *args, **kwargs):
         result = self._original(*args, **kwargs)
-        self._profiler.record_call(self._op_name, args, kwargs, result)
+        if not torch.compiler.is_compiling():
+            self._profiler.record_call(self._op_name, args, kwargs, result)
         return result
-    
+
     def __getitem__(self, key):
         original_item = self._original[key]
         return _TritonLaunchedKernelWrapper(original_item, self._op_name, self._profiler, key)
-    
+
     def __getattr__(self, name):
         return getattr(self._original, name)
-    
+
     def __repr__(self):
         return f"TritonKernelWrapper({self._original})"
     
@@ -177,8 +179,9 @@ class _TritonLaunchedKernelWrapper:
     
     def __call__(self, *args, **kwargs):
         result = self._original(*args, **kwargs)
-        grid_info = str(self._grid_key) if self._grid_key else "unknown"
-        self._profiler.record_call(f"{self._op_name}[{grid_info}]", args, kwargs, result)
+        if not torch.compiler.is_compiling():
+            grid_info = str(self._grid_key) if self._grid_key else "unknown"
+            self._profiler.record_call(f"{self._op_name}[{grid_info}]", args, kwargs, result)
         return result
     
     def __getattr__(self, name):
@@ -213,7 +216,7 @@ class ShapeProfiler:
     def _get_shape_dtype(self, obj: Any) -> List[Tuple[List[int], str]]:
         results = []
         if isinstance(obj, torch.Tensor):
-            results.append((list(obj.shape), str(obj.dtype)))
+            results.append(([int(d) for d in obj.shape], str(obj.dtype)))
         elif isinstance(obj, (list, tuple)):
             for item in obj:
                 results.extend(self._get_shape_dtype(item))
@@ -292,7 +295,8 @@ class ShapeProfiler:
         @functools.wraps(func)
         def wrapped(*args, **kwargs):
             result = func(*args, **kwargs)
-            profiler.record_call(op_name, args, kwargs, result)
+            if not torch.compiler.is_compiling():
+                profiler.record_call(op_name, args, kwargs, result)
             return result
         wrapped._shape_profiler_wrapped = True
         return wrapped
@@ -355,8 +359,9 @@ class ShapeProfiler:
         @functools.wraps(func)
         def wrapped(*args, **kwargs):
             result = func(*args, **kwargs)
-            profiler._save_record_directly(op_name, args, kwargs, result)
-            profiler.record_call(op_name, args, kwargs, result)
+            if not torch.compiler.is_compiling():
+                profiler._save_record_directly(op_name, args, kwargs, result)
+                profiler.record_call(op_name, args, kwargs, result)
             return result
         wrapped._shape_profiler_wrapped = True
         return wrapped
@@ -468,13 +473,20 @@ class ShapeProfiler:
         except Exception as e:
             print(f"[ShapeProfiler] DEBUG: hook direct_register_custom_op 失败: {e}", flush=True)
     
+    def _is_graph_mode(self):
+        return "--enforce-eager" not in sys.argv
+
     def install_hooks(self, output_dir: str = None):
         if self.enabled:
             return
-        
+
         self.output_dir = output_dir
         self.enabled = True
-        
+
+        graph_mode = self._is_graph_mode()
+        if graph_mode:
+            print("[ShapeProfiler] DEBUG: 检测到图模式，跳过 torch ops hook 以避免 graph break", flush=True)
+
         self._hook_direct_register_custom_op()
         
         triton_ops = [
@@ -507,8 +519,9 @@ class ShapeProfiler:
         
         for module_path, attr_name, op_name in triton_ops:
             self._install_module_hook(module_path, attr_name, op_name)
-        
-        torch_ops = [
+
+        if not graph_mode:
+            torch_ops = [
             ("torch.ops._C_ascend.batch_matmul_transpose", "batch_matmul_transpose"),
             ("torch.ops._C_ascend.npu_add_rms_norm_bias", "npu_add_rms_norm_bias"),
             ("torch.ops._C_ascend.npu_gemma_rms_norm", "npu_gemma_rms_norm"),
@@ -564,13 +577,13 @@ class ShapeProfiler:
             ("torch.distributed.all_gather_into_tensor", "all_gather_into_tensor"),
             ("torch.distributed.reduce_scatter_tensor", "reduce_scatter_tensor"),
             ("torch.distributed.all_to_all_single", "all_to_all_single"),
-            ("torch_npu.npu_fused_infer_attention_score", "npu_fused_infer_attention_score"),
-        ]
-        
-        for op_path, op_name in torch_ops:
-            self._install_torch_op_hook(op_path, op_name)
+                ("torch_npu.npu_fused_infer_attention_score", "npu_fused_infer_attention_score"),
+            ]
 
-        self._patch_cross_module_refs()
+            for op_path, op_name in torch_ops:
+                self._install_torch_op_hook(op_path, op_name)
+
+            self._patch_cross_module_refs()
 
         print(f"[ShapeProfiler] Worker 进程已安装 {len(self.original_funcs)} 个 hooks"
               f" (pid={self._pid}, dp_rank={self._dp_rank}, dp_size={self._dp_size})", flush=True)
