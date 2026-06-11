@@ -149,21 +149,14 @@ class ArgShapeInfo:
 class OpShapeRecord:
     op_name: str
     call_count: int = 0
-    arg_shapes: Dict[int, Dict[str, int]] = field(default_factory=dict)
-    kwarg_shapes: Dict[str, Dict[str, int]] = field(default_factory=dict)
-    output_shapes: Dict[str, int] = field(default_factory=dict)
-    first_call_time: str = ""
-    last_call_time: str = ""
+    # key: canonical call signature string -> count
+    call_signatures: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return {
             "op_name": self.op_name,
             "call_count": self.call_count,
-            "arg_shapes": self.arg_shapes,
-            "kwarg_shapes": self.kwarg_shapes,
-            "output_shapes": self.output_shapes,
-            "first_call_time": self.first_call_time,
-            "last_call_time": self.last_call_time,
+            "call_signatures": self.call_signatures,
         }
 
 
@@ -560,28 +553,20 @@ class ShapeProfiler:
                 )
             
             aggregated[op_name].call_count += 1
-            # aggregated[op_name].last_call_time = rec["call_time"]
-            
+
+            def _tensors_str(info):
+                tensors = info.get("tensors") or ([{"shape": info["shape"], "dtype": info["dtype"]}] if "shape" in info else [])
+                return "|".join(f"{t['shape']}:{t['dtype']}" for t in tensors)
+
+            sig_parts = []
             for arg_info in rec.get("arg_shapes", []):
-                arg_idx = arg_info["arg_idx"]
-                shape_key = f"{arg_info['shape']}:{arg_info['dtype']}"
-                if arg_idx not in aggregated[op_name].arg_shapes:
-                    aggregated[op_name].arg_shapes[arg_idx] = {}
-                aggregated[op_name].arg_shapes[arg_idx][shape_key] = \
-                    aggregated[op_name].arg_shapes[arg_idx].get(shape_key, 0) + 1
-            
+                sig_parts.append(f"arg{arg_info['arg_idx']}={_tensors_str(arg_info)}")
             for kwarg_info in rec.get("kwarg_shapes", []):
-                key = kwarg_info["key"]
-                shape_key = f"{kwarg_info['shape']}:{kwarg_info['dtype']}"
-                if key not in aggregated[op_name].kwarg_shapes:
-                    aggregated[op_name].kwarg_shapes[key] = {}
-                aggregated[op_name].kwarg_shapes[key][shape_key] = \
-                    aggregated[op_name].kwarg_shapes[key].get(shape_key, 0) + 1
-            
+                sig_parts.append(f"{kwarg_info['key']}={_tensors_str(kwarg_info)}")
             for out_info in rec.get("output_shapes", []):
-                shape_key = f"{out_info['shape']}:{out_info['dtype']}"
-                aggregated[op_name].output_shapes[shape_key] = \
-                    aggregated[op_name].output_shapes.get(shape_key, 0) + 1
+                sig_parts.append(f"out={out_info['shape']}:{out_info['dtype']}")
+            sig = ", ".join(sig_parts)
+            aggregated[op_name].call_signatures[sig] = aggregated[op_name].call_signatures.get(sig, 0) + 1
         
         return aggregated
 
@@ -640,54 +625,23 @@ class ShapeProfiler:
             lines.append(f"**DP Ranks**: {sorted(dp_ranks)} (共 {len(dp_ranks)} 个)\n\n")
         
         lines.append("## 算子调用统计\n\n")
-        lines.append("| 算子名称 | 调用次数 | 参数 Shape 分布 |\n")
-        lines.append("|:---|:---:|:---|\n")
-        
+        lines.append("| 算子名称 | 调用次数 | 唯一调用签名数 |\n")
+        lines.append("|:---|:---:|:---:|\n")
+
         for op_name, rec in sorted(aggregated.items(), key=lambda x: -x[1].call_count):
-            shape_info = []
-            for arg_idx, shapes in sorted(rec.arg_shapes.items()):
-                shape_strs = []
-                for shape_key, count in sorted(shapes.items(), key=lambda x: -x[1]):
-                    shape_strs.append(f"{shape_key}({count})")
-                shape_info.append(f"arg{arg_idx}: {', '.join(shape_strs)}")
-            
-            lines.append(f"| {op_name} | {rec.call_count} | {'; '.join(shape_info)} |\n")
-        
-        lines.append("\n## 详细 Shape 分布\n\n")
-        
+            lines.append(f"| {op_name} | {rec.call_count} | {len(rec.call_signatures)} |\n")
+
+        lines.append("\n## 详细调用签名分布\n\n")
+
         for op_name, rec in sorted(aggregated.items(), key=lambda x: -x[1].call_count):
             lines.append(f"### {op_name}\n\n")
             lines.append(f"- **调用次数**: {rec.call_count}\n")
-            # lines.append(f"- **首次调用**: {rec.first_call_time}\n")
-            # lines.append(f"- **最后调用**: {rec.last_call_time}\n\n")
-            
-            if rec.arg_shapes:
-                lines.append("#### 参数 Shape 分布\n\n")
-                for arg_idx, shapes in sorted(rec.arg_shapes.items()):
-                    lines.append(f"| arg{arg_idx} Shape | DType | 次数 |\n")
-                    lines.append("|:---|:---|:---:|\n")
-                    for shape_key, count in sorted(shapes.items(), key=lambda x: -x[1]):
-                        shape_str, dtype = shape_key.rsplit(":", 1)
-                        lines.append(f"| {shape_str} | {dtype} | {count} |\n")
-                    lines.append("\n")
-            
-            if rec.kwarg_shapes:
-                lines.append("#### 关键字参数 Shape 分布\n\n")
-                for key, shapes in sorted(rec.kwarg_shapes.items()):
-                    lines.append(f"| {key} Shape | DType | 次数 |\n")
-                    lines.append("|:---|:---|:---:|\n")
-                    for shape_key, count in sorted(shapes.items(), key=lambda x: -x[1]):
-                        shape_str, dtype = shape_key.rsplit(":", 1)
-                        lines.append(f"| {shape_str} | {dtype} | {count} |\n")
-                    lines.append("\n")
-            
-            if rec.output_shapes:
-                lines.append("#### 输出 Shape 分布\n\n")
-                lines.append("| Shape | DType | 次数 |\n")
-                lines.append("|:---|:---|:---:|\n")
-                for shape_key, count in sorted(rec.output_shapes.items(), key=lambda x: -x[1]):
-                    shape_str, dtype = shape_key.rsplit(":", 1)
-                    lines.append(f"| {shape_str} | {dtype} | {count} |\n")
+            if rec.call_signatures:
+                lines.append("\n#### 调用签名（入参+出参组合）\n\n")
+                lines.append("| 签名 | 次数 |\n")
+                lines.append("|:---|:---:|\n")
+                for sig, count in sorted(rec.call_signatures.items(), key=lambda x: -x[1]):
+                    lines.append(f"| `{sig}` | {count} |\n")
                 lines.append("\n")
         
         with open(filepath, "w", encoding="utf-8") as f:
