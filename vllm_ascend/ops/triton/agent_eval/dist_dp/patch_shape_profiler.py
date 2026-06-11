@@ -233,6 +233,7 @@ class ShapeProfiler:
         self.enabled = False
         self.original_funcs: Dict[str, Tuple[Any, Any]] = {}
         self.records: List[Dict] = []
+        self._seen_keys: set = set()
         self.output_dir: str = None
         self._pid = os.getpid()
         self._dp_rank, self._dp_size = _detect_dp_info()
@@ -252,8 +253,19 @@ class ShapeProfiler:
                 results.extend(self._get_shape_dtype(v))
         return results
     
+    def _make_dedup_key(self, record: Dict) -> tuple:
+        return (
+            record["op_name"],
+            tuple(tuple(s["shape"]) + (s["dtype"],) for s in record.get("arg_shapes", [])),
+            tuple(tuple(s["shape"]) + (s["dtype"],) for s in record.get("kwarg_shapes", [])),
+            tuple(tuple(s["shape"]) + (s["dtype"],) for s in record.get("output_shapes", [])),
+        )
+
     def _store_record(self, record: Dict):
-        self.records.append(record)
+        key = self._make_dedup_key(record)
+        if key not in self._seen_keys:
+            self._seen_keys.add(key)
+            self.records.append(record)
     
     def _get_record_filename(self):
         if self._is_dp_mode:
@@ -371,6 +383,11 @@ class ShapeProfiler:
         if self._is_dp_mode:
             record["dp_rank"] = self._dp_rank
             record["dp_size"] = self._dp_size
+
+        key = self._make_dedup_key(record)
+        if key in self._seen_keys:
+            return
+        self._seen_keys.add(key)
 
         output_file = os.path.join(output_dir, self._get_record_filename())
         try:
