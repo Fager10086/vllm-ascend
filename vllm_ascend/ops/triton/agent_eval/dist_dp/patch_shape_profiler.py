@@ -254,11 +254,14 @@ class ShapeProfiler:
         return results
     
     def _make_dedup_key(self, record: Dict) -> tuple:
+        def arg_key(a):
+            return (a.get("arg_idx", a.get("key")),
+                    tuple((tuple(t["shape"]), t["dtype"]) for t in a.get("tensors", [])))
         return (
             record["op_name"],
-            tuple(tuple(s["shape"]) + (s["dtype"],) for s in record.get("arg_shapes", [])),
-            tuple(tuple(s["shape"]) + (s["dtype"],) for s in record.get("kwarg_shapes", [])),
-            tuple(tuple(s["shape"]) + (s["dtype"],) for s in record.get("output_shapes", [])),
+            tuple(arg_key(a) for a in record.get("arg_shapes", [])),
+            tuple(arg_key(a) for a in record.get("kwarg_shapes", [])),
+            tuple((tuple(o["shape"]), o["dtype"]) for o in record.get("output_shapes", [])),
         )
 
     def _store_record(self, record: Dict):
@@ -293,27 +296,21 @@ class ShapeProfiler:
         for i, arg in enumerate(args):
             shapes_dtypes = self._get_shape_dtype(arg)
             if shapes_dtypes:
-                for shape, dtype in shapes_dtypes:
-                    arg_shapes.append({
-                        "arg_idx": i,
-                        "shape": shape,
-                        "dtype": dtype
-                    })
+                arg_shapes.append({
+                    "arg_idx": i,
+                    "tensors": [{"shape": s, "dtype": d} for s, d in shapes_dtypes],
+                })
 
         kwarg_shapes = []
         for k, v in kwargs.items():
             shapes_dtypes = self._get_shape_dtype(v)
             if shapes_dtypes:
-                for shape, dtype in shapes_dtypes:
-                    kwarg_shapes.append({
-                        "key": k,
-                        "shape": shape,
-                        "dtype": dtype
-                    })
+                kwarg_shapes.append({
+                    "key": k,
+                    "tensors": [{"shape": s, "dtype": d} for s, d in shapes_dtypes],
+                })
 
-        output_shapes = []
-        for shape, dtype in self._get_shape_dtype(result):
-            output_shapes.append({"shape": shape, "dtype": dtype})
+        output_shapes = [{"shape": s, "dtype": d} for s, d in self._get_shape_dtype(result)]
 
         record = {
             "op_name": op_name,
@@ -350,27 +347,21 @@ class ShapeProfiler:
         for i, arg in enumerate(args):
             shapes_dtypes = self._get_shape_dtype(arg)
             if shapes_dtypes:
-                for shape, dtype in shapes_dtypes:
-                    arg_shapes.append({
-                        "arg_idx": i,
-                        "shape": shape,
-                        "dtype": dtype
-                    })
+                arg_shapes.append({
+                    "arg_idx": i,
+                    "tensors": [{"shape": s, "dtype": d} for s, d in shapes_dtypes],
+                })
 
         kwarg_shapes = []
         for k, v in kwargs.items():
             shapes_dtypes = self._get_shape_dtype(v)
             if shapes_dtypes:
-                for shape, dtype in shapes_dtypes:
-                    kwarg_shapes.append({
-                        "key": k,
-                        "shape": shape,
-                        "dtype": dtype
-                    })
+                kwarg_shapes.append({
+                    "key": k,
+                    "tensors": [{"shape": s, "dtype": d} for s, d in shapes_dtypes],
+                })
 
-        output_shapes = []
-        for shape, dtype in self._get_shape_dtype(result):
-            output_shapes.append({"shape": shape, "dtype": dtype})
+        output_shapes = [{"shape": s, "dtype": d} for s, d in self._get_shape_dtype(result)]
 
         record = {
             "op_name": op_name,
