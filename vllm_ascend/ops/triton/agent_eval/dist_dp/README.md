@@ -24,6 +24,13 @@ export SHAPE_PROFILER_OUTPUT_DIR=/path/to/output   # 必须，触发 profiler
 ```shell
 python launch_online_dp.py     --dp-size 2     --tp-size 1     --dp-address 127.0.0.1     --dp-rpc-port 12325     --vllm-start-port 8300
 ```
+以及proxy
+```shell
+python /vllm-workspace/dp_load_balance_proxy_server.py \
+    --host 0.0.0.0 --port 9000 \
+    --dp-hosts 127.0.0.1 127.0.0.1 \
+    --dp-ports 8300 8301
+```
 正常发送推理请求后，Ctrl+C结束服务，然后进行合并报告：
 ```shell
 python /vllm-workspace/shape_profiler.py --merge-only --output-dir /path/to/output
