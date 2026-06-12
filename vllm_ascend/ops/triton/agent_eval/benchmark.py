@@ -159,6 +159,9 @@ def extract_kernel_perf(op_summary_csv: str, kernel_name: str) -> list[dict]:
 def _normalize_dtype(dtype: str) -> str:
     """统一 dtype 表示: bf16/BF16→BF16, float/FLOAT/float32/FLOAT32→FLOAT, etc."""
     d = dtype.strip().upper()
+    # strip "DT_" prefix emitted by op_summary (e.g. "DT_BF16" → "BF16")
+    if d.startswith("DT_"):
+        d = d[3:]
     alias = {
         "FP16": "FLOAT16", "FP32": "FLOAT32", "FP64": "FLOAT64",
         "BF16": "BFLOAT16",
@@ -374,13 +377,14 @@ def get_theoretical_perf(golden_path: str) -> list[dict]:
                   op_category, bound_detail.
     失败时返回空列表.
     """
+    tilesim_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tilesim-master")
     cmd = (
         f'python -m examples.api.operator_api.pytorch_examples.main '
         f'--script {golden_path}'
     )
-    print(f"  [CMD] {cmd}")
+    print(f"  [CMD] {cmd}  (cwd={tilesim_dir})")
 
-    proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=tilesim_dir)
     combined = proc.stdout + proc.stderr
 
     for line in combined.splitlines():
@@ -597,11 +601,21 @@ def main():
             print(f"  [WARN] 未获取到理论极限数据")
 
         for rec in perf_records:
-            # 构造实测记录的 match key
+            # 先精确匹配 key，失败则按 dtype 匹配（varlen 场景 T 维度不同）
             actual_key = make_match_key_from_actual(rec)
-
-            # 查找匹配的理论用例
             matched = theo_map.get(actual_key)
+
+            if not matched and len(theo_cases) == 1:
+                # 单用例时直接使用（varlen 下实测 T != 理论 T）
+                matched = theo_cases[0]
+            elif not matched and theo_cases:
+                # 多用例时按 dtype 匹配
+                actual_dtypes = [_normalize_dtype(d) for d in rec["input_data_types"].split(';') if d.strip()]
+                for tc in theo_cases:
+                    theo_dtypes = tc["input_data_types"].split(';')
+                    if actual_dtypes and theo_dtypes and actual_dtypes[0] == theo_dtypes[0]:
+                        matched = tc
+                        break
 
             if matched:
                 theoretical   = matched["latency"]
