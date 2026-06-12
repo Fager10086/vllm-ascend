@@ -1,18 +1,15 @@
 # 单机多卡
-单机 2 DP，每 DP 1 卡
+将patch_shape_profiler.py放到vllm-ascend/ops目录下，
+并修改vllm_ascend/ops/__init__.py,将以下两行写入__init__文件开头
 ```shell
-  python /vllm-workspace/shape_profiler.py \--serve \
-    --model /home/weights/Qwen3.5-0.8B \
-    --dp-size 2 \
-    --dp-size-local 2 \
-    --dp-address 127.0.0.1 \
-    --dp-rpc-port 12321 \
-    --vllm-start-port 8010 \
-    --tensor-parallel-size 1 \
-    --gpu-memory-utilization 0.5 \
-    --output-dir ./dp_output \
-    --enforce-eager
+import vllm.utils.torch_utils
+import vllm_ascend.ops.patch_shape_profiler
 ```
+设置环境变量用于决定数据落盘地址
+```shell
+export SHAPE_PROFILER_OUTPUT_DIR=/path/to/output   # 必须，触发 profiler 
+```
+正常执行单机服务拉起命令，根据业务实际场景修改:
 ```shell
 export VLLM_DISABLE_COMPILE_CACHE=1
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib64
@@ -54,9 +51,18 @@ vllm serve /home/weights/Qwen3.5-35B-A3B-W8A8-MXFP8-FULL-QUANT \
     --additional-config '{"enable_cpu_binding":true}' \
     --no-enable-prefix-caching
 ```
-  内部逻辑：自动为每个 DP rank 设置SHAPE_PROFILER_DP_RANK、SHAPE_PROFILER_DP_SIZE、ASCEND_RT_VISIBLE_DEVICES（按0,1,2... 顺序分配），启动子进程跑 vllm serve推理请求，Ctrl+C 后合并报告。
+  正常发送推理请求后，Ctrl+C结束服务，然后进行合并报告：
+```shell
+python /vllm-workspace/shape_profiler.py --merge-only --output-dir /path/to/output
+```
   
 # 多机
+将patch_shape_profiler.py放到要采集的节点的vllm-ascend/ops目录下，
+并修改vllm_ascend/ops/__init__.py,将以下两行写入__init__文件开头
+```shell
+import vllm.utils.torch_utils
+import vllm_ascend.ops.patch_shape_profiler
+```
 设置环境变量
 ```shell
 export SHAPE_PROFILER_OUTPUT_DIR=/path/to/output   # 必须，触发 profiler 
