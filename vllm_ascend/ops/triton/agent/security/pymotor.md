@@ -11,28 +11,130 @@
 
 MindIE-PyMotor 是华为 MindIE 平台的分布式大模型推理编排层，实现了 Prefill/Decode 分离（PD Disaggregation）、KV Cache 亲和调度、多节点容错等特性，对外暴露兼容 OpenAI/Anthropic 的 HTTP 推理接口。
 
-### 主要组件与信任边界
+### 数据流图（DFD）与信任边界
+
+下图为 Level-1 数据流图，虚线框表示信任边界（Trust Boundary）。
 
 ```
-[外部客户端]
-      │ HTTP/HTTPS  (TB1 — 外部信任边界)
-      ▼
-[Coordinator / InferenceServer]   motor/coordinator/api_server/inference_server.py
-      │
-      ├── 内部 HTTP ──► [Router / Dispatch]      motor/coordinator/router/dispatch.py
-      │
-      ├── ZMQ (无认证) ► [Scheduler]             motor/coordinator/scheduler/
-      │
-      └── gRPC (可选mTLS) ► [Etcd]              motor/common/etcd/etcd_client.py
+╔══════════════════════════════════════════════════════════════════════╗
+║  TB0  外部网络（不可信区域）                                           ║
+║                                                                      ║
+║   [用户客户端 / SDK]          [RAS Monitor / 外部运维工具]            ║
+║     POST /v1/completions        POST /v1/completions                 ║
+║     POST /v1/chat/completions   （读取负载信息）                      ║
+╚══════════════╤═══════════════════════════╤══════════════════════════╝
+               │ HTTPS / HTTP              │ HTTP
+               │ Authorization: Bearer     │ （无 API Key 时无凭据）
+               │ [TB1] ← 唯一合法入口      │
+               ▼                           ▼
+╔══════════════════════════════════════════════════════════════════════╗
+║  TB1  Coordinator 信任边界                                            ║
+║                                                                      ║
+║  ┌────────────────────────────────────────────────────────────────┐  ║
+║  │              InferenceServer                                   │  ║
+║  │   inference_server.py:172                                      │  ║
+║  │                                                                │  ║
+║  │  ① verify_api_key()     ← [!] enable_api_key 默认 False       │  ║
+║  │  ② validate_and_sanitize_path()                               │  ║
+║  │  ③ filter_sensitive_headers/body()                            │  ║
+║  │  ④ log_audit_event()    ← [!] user_id 无法区分个体            │  ║
+║  │  ⑤ setup_rate_limiting() ← [!] 进程级，多副本失效             │  ║
+║  │          │                                                     │  ║
+║  │          ▼ 内部 HTTP                                           │  ║
+║  │  ┌───────────────────┐                                        │  ║
+║  │  │  Router/Dispatch  │  dispatch.py:107                       │  ║
+║  │  │  handle_request() │                                        │  ║
+║  │  └─────────┬─────────┘                                        │  ║
+║  └────────────┼────────────────────────────────────────────────┘  ║
+║               │                                                      ║
+║        [TB2]  │ ZMQ（无 HMAC / 无 CURVE）                           ║
+║               │ [!] 无对端身份验证                                   ║
+║               ▼                                                      ║
+║  ┌───────────────────────────────────┐                              ║
+║  │           Scheduler               │  scheduler/runtime/          ║
+║  │  KV Cache 亲和 / 负载均衡调度     │                              ║
+║  │  分配 Prefill + Decode 引擎对     │                              ║
+║  └──────────┬──────────────┬─────────┘                              ║
+║             │              │                                         ║
+╚════════════╪══════════════╪════════════════════════════════════════╝
+             │ 内部 HTTP/HTTPS（可选 TLS）
+             │ [TB3] Coordinator → Engine 边界
+             ▼              ▼
+╔═══════════════════════════════════════════════════════════════════╗
+║  TB3  推理引擎区（Engine Zone）                                     ║
+║                                                                    ║
+║  ┌─────────────────────┐    ┌─────────────────────┐              ║
+║  │  Prefill Engine     │◄──►│  Decode Engine      │              ║
+║  │  (vLLM / SGLang)    │    │  (vLLM / SGLang)    │              ║
+║  │  dispatch_adapter/  │    │  dispatch_adapter/  │              ║
+║  │  base.py:306        │    │  base.py:306        │              ║
+║  └─────────────────────┘    └─────────────────────┘              ║
+╚═══════════════════════════════════════════════════════════════════╝
 
-[NodeManager API]   motor/node_manager/api_server/node_manager_api.py
-      │ HTTP（无认证）
-      └── 控制 [EngineServer (vLLM/SGLang)]
+╔═══════════════════════════════════════════════════════════════════╗
+║  TB4  NodeManager 区（⚠ 无认证，高风险隔离区）                     ║
+║                                                                    ║
+║  ┌──────────────────────────────────────────────────────────┐    ║
+║  │  NodeManager API   node_manager_api.py:46                │    ║
+║  │                                                          │    ║
+║  │  POST /node-manager/start  ← [!] 无 Middleware           │    ║
+║  │  POST /node-manager/stop   ← [!] 无 Middleware           │    ║
+║  │  POST /node-manager/pause  ← [!] 无 Middleware           │    ║
+║  │  POST /node-manager/resume ← [!] 无 Middleware           │    ║
+║  │  GET  /node-manager/status ← [!] 无 Middleware           │    ║
+║  │            │                                             │    ║
+║  │            ▼ 进程控制                                    │    ║
+║  │  ┌─────────────────────┐                                │    ║
+║  │  │  Daemon / Engine    │   启动 / 停止 / 暂停引擎进程    │    ║
+║  │  │  Manager            │                                │    ║
+║  │  └─────────────────────┘                                │    ║
+║  └──────────────────────────────────────────────────────────┘    ║
+╚═══════════════════════════════════════════════════════════════════╝
 
-[Controller]   motor/controller/api_server/controller_api.py
-      │ 内部 HTTP（路径 ACL）
-      └── 可观测性 / 容错编排
+╔═══════════════════════════════════════════════════════════════════╗
+║  TB5  数据存储区（Etcd）                                           ║
+║                                                                    ║
+║  ┌──────────────────────────────────────────────────────────┐    ║
+║  │  Etcd   etcd_client.py:68                                │    ║
+║  │                                                          │    ║
+║  │  gRPC（enable_tls=False 时降级明文）← [!]                │    ║
+║  │                                                          │    ║
+║  │  存储：引擎注册信息 / 调度元数据 / 分布式锁               │    ║
+║  │  Key 前缀：$POD_NAMESPACE/$JOB_NAME/... ← [!] 来自环境变量│   ║
+║  └──────────────────────────────────────────────────────────┘    ║
+║                    ▲                ▲                             ║
+║             读写   │                │  读写                       ║
+║          Coordinator             Controller                       ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  TB6  Controller 可观测性区（内部，路径 ACL）                      ║
+║                                                                    ║
+║  ┌──────────────────────────────────────────────────────────┐    ║
+║  │  Controller API   controller_api.py                      │    ║
+║  │  指标聚合 / 容错状态 / 故障上报                           │    ║
+║  │  访问控制：路径前缀 ACL（无密码学身份验证）               │    ║
+║  └──────────────────────────────────────────────────────────┘    ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+图例
+────
+[TB1..TB6]  信任边界编号
+[!]         已识别安全缺陷（详见第三节）
+◄──►        双向数据流
+─────►      单向数据流
 ```
+
+### 信任边界说明
+
+| 边界 | 描述 | 当前保护机制 | 缺陷 |
+|---|---|---|---|
+| **TB0→TB1** | 外网进入 Coordinator | HTTPS（可选）+ API Key（可选）| API Key 默认关闭（T01）|
+| **TB1 内部** | Coordinator → Router → Scheduler | ZMQ 内部通信 | 无对端认证（T10）|
+| **TB1→TB3** | Coordinator → EngineServer | HTTP/HTTPS（可选 TLS）| TLS 非强制 |
+| **TB4（NodeManager）** | 外部 / 内部 → NodeManager | 无 | **完全无认证（T03）**|
+| **TB5（Etcd）** | 各组件 → Etcd | gRPC + 可选 mTLS | 可静默降级明文（T06）|
+| **TB6（Controller）** | 内部 → Controller | 路径前缀 ACL | 无密码学认证 |
 
 ---
 
