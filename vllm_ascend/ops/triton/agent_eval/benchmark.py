@@ -71,9 +71,13 @@ def run_msprof(kernel_path: str, result_dir: str) -> str:
     """
     对指定测试脚本运行 msprof, 返回性能数据保存目录 (PROF_xxx 路径).
     """
+    # cmd = (
+    #     f'msprof --application="python -m pytest {kernel_path}" '
+    #     f'--output="{result_dir}"'
+    # )
     cmd = (
-        f'msprof --application="python -m pytest {kernel_path}" '
-        f'--output="{result_dir}"'
+        f'msprof --output="{result_dir}" '
+        f'python -m pytest {kernel_path}'
     )
     print(f"\n[INFO] 运行 msprof: {cmd}")
 
@@ -377,7 +381,8 @@ def get_theoretical_perf(golden_path: str) -> list[dict]:
                   op_category, bound_detail.
     失败时返回空列表.
     """
-    tilesim_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tilesim-master")
+    # tilesim_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tilesim-master")
+    tilesim_dir = os.path.dirname(os.path.abspath(__file__))
     cmd = (
         f'python -m examples.api.operator_api.pytorch_examples.main '
         f'--script {golden_path}'
