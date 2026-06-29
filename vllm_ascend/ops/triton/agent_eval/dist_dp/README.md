@@ -1,3 +1,8 @@
+# 算子白名单适配
+当前工具用于采集配置到白名单算子的shape，按照后面"单机多卡"和"多机"进行配置后，即可进行采集。
+白名单配置方式为：
+在patch_shape_profiler.py中，将要采集的算子添加到triton_ops或torch_ops中（根据算子种类决定配置到哪个列表），其中，配置的键值对里，key为算子的调用方式，value为这个算子名的缩写（由自己定义，无格式要求，主要用于最后输出报告中的算子名显示）
+
 # 单机多卡
 将patch_shape_profiler.py放到vllm-ascend/ops目录下，
 并修改vllm_ascend/ops/__init__.py,将以下两行写入__init__文件开头
