@@ -2,7 +2,7 @@
 -r requirements.txt
 modelscope>=1.35.1
 openai
-pytest >= 6.0,<9.0.0
+pytest >= 9.1.1,< 10.0.0
 pytest-asyncio
 pytest-mock
 lm-eval==0.4.11
@@ -13,7 +13,7 @@ types-psutil
 pytest-cov
 regex
 sentence_transformers
-ray>=2.47.1,<=2.48.0
+ray<=2.56.1,>=2.56.1
 protobuf>3.20.0
 jiwer
 librosa
